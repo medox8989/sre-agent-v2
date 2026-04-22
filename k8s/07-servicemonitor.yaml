@@ -1,0 +1,40 @@
+# ── ServiceMonitor — tells kube-prometheus-stack to scrape the SRE Agent ────
+#
+# Prerequisites (already true in your cluster):
+#   - Prometheus Operator running (prometheus-stack)
+#   - ServiceMonitor CRD installed
+#
+# This creates a ServiceMonitor in the 'monitoring' namespace (where Prometheus lives).
+# Prometheus discovers it automatically via its serviceMonitorSelector.
+#
+# After applying, verify scrape target appears in:
+#   kubectl port-forward -n monitoring svc/prometheus-stack-kube-prom-prometheus 9090
+#   → http://localhost:9090/targets  (look for sre-agent)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sre-agent
+  namespace: monitoring          # Must be in Prometheus' namespace or a watched namespace
+  labels:
+    app: sre-agent
+    # ── Match the label selector on your Prometheus CRD ─────────────────────
+    # Check with: kubectl get prometheus -n monitoring -o yaml | grep serviceMonitorSelector
+    release: prometheus-stack    # kube-prometheus-stack default label
+spec:
+  # ── Which namespace(s) to look for the Service ──────────────────────────
+  namespaceSelector:
+    matchNames:
+      - sre-agent
+
+  # ── Which Service to monitor (must match Service labels) ────────────────
+  selector:
+    matchLabels:
+      app: sre-agent
+
+  # ── Scrape endpoint config ───────────────────────────────────────────────
+  endpoints:
+    - port: http          # matches the port name in 06-service.yaml
+      path: /metrics
+      interval: 60s       # scrape every 60 seconds (matches CHECK_INTERVAL_SECONDS)
+      scrapeTimeout: 15s

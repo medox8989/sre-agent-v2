@@ -1,0 +1,69 @@
+# ServiceAccount — identity for the agent pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-agent
+  namespace: sre-agent
+  labels:
+    app: sre-agent
+automountServiceAccountToken: true
+---
+# ClusterRole — READ-ONLY access to the resources we inspect
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-agent-reader
+  labels:
+    app: sre-agent
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - pods
+      - namespaces
+      - persistentvolumeclaims
+      - events
+    verbs: ["get", "list"]
+  # Apps resources
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list"]
+  # Batch (Jobs / CronJobs)
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list"]
+  # Endpoints (for service health check)
+  - apiGroups: [""]
+    resources:
+      - endpoints
+      - services
+    verbs: ["get", "list"]
+  # Metrics (optional — agent degrades gracefully if unavailable)
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+---
+# ClusterRoleBinding — bind the role to the agent ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sre-agent-reader
+  labels:
+    app: sre-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sre-agent-reader
+subjects:
+  - kind: ServiceAccount
+    name: sre-agent
+    namespace: sre-agent

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent
+  namespace: sre-agent
+  labels:
+    app: sre-agent
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: sre-agent
+  template:
+    metadata:
+      labels:
+        app: sre-agent
+      annotations:
+        # Tell Prometheus to scrape this pod directly (fallback if ServiceMonitor not used)
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8080"
+        prometheus.io/path:   "/metrics"
+    spec:
+      serviceAccountName: sre-agent
+
+      # ── Pull from your OCIR (same registry as all Odoo images) ──────────
+      imagePullSecrets:
+        - name: ocir-secret    # copied from another namespace — see deploy.sh
+
+      # ── Non-root security context ────────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: sre-agent
+          # ── IMPORTANT: update tag when you rebuild ──────────────────────
+          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v3
+          imagePullPolicy: IfNotPresent
+
+          # Default: continuous loop.
+          # On-demand: kubectl exec deploy/sre-agent -n sre-agent -- python agent.py --once
+          command: ["python", "agent.py"]
+
+          env:
+            # Force ANSI colors even when stdout is not a tty
+            - name: FORCE_COLOR
+              value: "1"
+
+          # Load config thresholds from ConfigMap, Slack webhook from Secret
+          envFrom:
+            - configMapRef:
+                name: sre-agent-config
+            - secretRef:
+                name: sre-agent-secrets
+
+          # ── Expose metrics port ──────────────────────────────────────────
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+
+          # ── Resource limits ──────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+              ephemeral-storage: 100Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+              ephemeral-storage: 300Mi
+
+          # ── Liveness: HTTP GET /health — confirms the metrics server is alive ──
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3
+
+          # ── Readiness: same endpoint — pod only receives traffic when healthy ──
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 2
+
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 15

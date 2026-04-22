@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-agent-config
+  namespace: sre-agent
+  labels:
+    app: sre-agent
+data:
+  # ── Identity ────────────────────────────────────────────────────
+  # Human-readable name shown in dashboard title and Slack alerts
+  CLUSTER_NAME: "oke-jamiat-jeddah"
+
+  # ── Timing ──────────────────────────────────────────────────────
+  # How often to run all checks (seconds). 300 = every 5 minutes
+  CHECK_INTERVAL_SECONDS: "300"
+  HTTP_PORT: "8080"
+
+  # ── Thresholds ──────────────────────────────────────────────────
+  # Container restart count before raising a WARNING (×4 = CRITICAL)
+  RESTART_THRESHOLD: "5"
+
+  # Minutes a pod can be Pending before a WARNING is raised
+  PENDING_THRESHOLD_MINUTES: "10"
+
+  # Age (days) for a 0/0/0 ReplicaSet to be flagged as old
+  OLD_RS_THRESHOLD_DAYS: "3"
+
+  # Age (hours) for a Failed pod to be flagged as not cleaned up
+  OLD_FAILED_POD_HOURS: "2"
+
+  # Node memory/CPU limits % above allocatable to warn about overcommit
+  OVERCOMMIT_WARN_PERCENT: "120"
+
+  # How many Warning events to fetch per check cycle (caps memory usage)
+  # Increase if you want deeper event history, decrease for lower memory
+  EVENTS_LOOKBACK_HOURS: "2"

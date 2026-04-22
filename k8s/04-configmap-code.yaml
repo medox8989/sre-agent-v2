@@ -1,0 +1,896 @@
+## ConfigMap holding the SRE agent source code.
+## Mounted at /app/agent.py inside the container.
+## To update the agent: edit agent.py, rebuild image, kubectl apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-agent-code
+  namespace: sre-agent
+  labels:
+    app: sre-agent
+data:
+  agent.py: |
+    #!/usr/bin/env python3
+    """
+    SRE Agent v2 — Kubernetes Cluster Health Monitor
+    CLI-first output with Slack alerting.
+
+    Run modes:
+      python agent.py            # continuous loop (prints every CHECK_INTERVAL seconds)
+      python agent.py --once     # run once, print, exit (for on-demand / CronJob use)
+
+    Checks:
+      Nodes        — Ready/NotReady, DiskPressure, MemoryPressure, PIDPressure
+      Pods         — Evicted, CrashLoopBackOff, OOMKilled, Pending, high restarts,
+                     ContainerStatusUnknown, dead pods not cleaned up
+      Events       — All Warning-type K8s events (last 2h) — cluster history
+      PVCs         — Lost / Pending (stuck) PersistentVolumeClaims
+      DaemonSets   — Not fully rolled out
+      StatefulSets — Not fully ready
+      Jobs         — Failed Kubernetes Jobs
+      Services     — Services with no ready endpoints (broken selector)
+      Deployments  — imagePullPolicy:Always, no ephemeral-storage limit,
+                     high revisionHistoryLimit, no resource requests
+      ReplicaSets  — Old 0/0/0 RSes pinning image layers on disk
+      Resources    — Memory/CPU limit overcommit per node
+      No Requests  — Pods running without resource requests (scheduling risk)
+    """
+
+    import gc
+    import sys
+    import os
+    import time
+    import logging
+    import threading
+    from datetime import datetime, timedelta, timezone
+    from typing import Any, Dict, List, Optional, Tuple
+
+    import requests
+    from kubernetes import client, config
+    from kubernetes.client.rest import ApiException
+
+    # ── Config ────────────────────────────────────────────────────────────────────
+    CLUSTER_NAME         = os.getenv("CLUSTER_NAME",              "k8s-cluster")
+    SLACK_WEBHOOK_URL    = os.getenv("SLACK_WEBHOOK_URL",         "")
+    CHECK_INTERVAL       = int(os.getenv("CHECK_INTERVAL_SECONDS","300"))
+    RESTART_THRESHOLD    = int(os.getenv("RESTART_THRESHOLD",     "5"))
+    PENDING_MINUTES      = int(os.getenv("PENDING_THRESHOLD_MINUTES", "10"))
+    OLD_RS_DAYS          = int(os.getenv("OLD_RS_THRESHOLD_DAYS", "3"))
+    OLD_FAILED_POD_HOURS = int(os.getenv("OLD_FAILED_POD_HOURS",  "2"))
+    OVERCOMMIT_WARN_PCT  = int(os.getenv("OVERCOMMIT_WARN_PERCENT","120"))
+    EVENTS_LOOKBACK_H    = int(os.getenv("EVENTS_LOOKBACK_HOURS", "2"))
+
+    SKIP_NS = {
+        "kube-system","cert-manager","monitoring",
+        "ingress-nginx","nfs","kube-public","kube-node-lease",
+    }
+
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    # ── ANSI Colors (no external deps) ───────────────────────────────────────────
+    USE_COLOR = sys.stdout.isatty() or os.getenv("FORCE_COLOR", "")
+    R  = "\033[91m"   if USE_COLOR else ""   # red
+    Y  = "\033[93m"   if USE_COLOR else ""   # yellow
+    G  = "\033[92m"   if USE_COLOR else ""   # green
+    B  = "\033[94m"   if USE_COLOR else ""   # blue
+    C  = "\033[96m"   if USE_COLOR else ""   # cyan
+    M  = "\033[95m"   if USE_COLOR else ""   # magenta
+    W  = "\033[97m"   if USE_COLOR else ""   # white/bright
+    DM = "\033[2m"    if USE_COLOR else ""   # dim
+    BD = "\033[1m"    if USE_COLOR else ""   # bold
+    RS = "\033[0m"    if USE_COLOR else ""   # reset
+
+    W72 = 72  # output width
+
+    def _line(char="─", width=W72): return char * width
+    def _head(title, char="━"): return f"\n{BD}{_line(char)}{RS}\n {W}{title}{RS}\n{BD}{_line(char)}{RS}"
+    def _sec(title):  return f"\n{BD}{DM}{_line('─')}{RS}\n {BD}{title}{RS}"
+    def _ok(s):       return f"{G}✅{RS}  {s}"
+    def _warn(s):     return f"{Y}⚠ {RS}  {s}"
+    def _crit(s):     return f"{R}🔴{RS}  {s}"
+    def _info(s):     return f"{B}ℹ {RS}  {s}"
+    def _dim(s):      return f"{DM}{s}{RS}"
+    def _bold(s):     return f"{BD}{s}{RS}"
+
+    # ── K8s helpers ───────────────────────────────────────────────────────────────
+    def _clients() -> Tuple:
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        return (
+            client.CoreV1Api(),
+            client.AppsV1Api(),
+            client.BatchV1Api(),
+        )
+
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _age(dt) -> str:
+        """Relative age: '14d', '2h30m', '5m'."""
+        if dt is None: return "?"
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        d = _now() - dt
+        dy, s = d.days, d.seconds
+        if dy > 1: return f"{dy}d"
+        if dy == 1: return f"1d{s//3600}h"
+        if s >= 3600: return f"{s//3600}h{(s%3600)//60}m"
+        return f"{s//60}m"
+
+    def _ts_full(dt) -> str:
+        """Exact UTC timestamp: '2026-04-22 17:45:32 UTC'."""
+        if not dt: return "?"
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def _issue(sev, check, ns_name, msg, when=None, age=None, action=None) -> Dict:
+        """
+        when  : datetime — auto-computes exact ts AND relative age from it (preferred)
+        age   : fallback pre-computed age string when datetime is not available
+        """
+        i = {"severity": sev, "check": check, "resource": ns_name, "message": msg}
+        if when is not None:
+            i["ts"]  = _ts_full(when)   # e.g. "2026-04-22 17:30:15 UTC"
+            i["age"] = _age(when)       # e.g. "14d"
+        elif age:
+            i["age"] = age
+        if action: i["action"] = action
+        return i
+
+    def _cpu(v) -> int:
+        v = str(v or "0").strip()
+        if v.endswith("m"): return int(v[:-1])
+        try:    return int(float(v) * 1000)
+        except: return 0
+
+    def _mem(v) -> int:
+        v = str(v or "0").strip()
+        try:
+            if v.endswith("Ki"): return int(v[:-2]) // 1024
+            if v.endswith("Mi"): return int(v[:-2])
+            if v.endswith("Gi"): return int(v[:-2]) * 1024
+            if v.endswith("Ti"): return int(v[:-2]) * 1024 * 1024
+            if v.endswith("K") or v.endswith("k"): return int(v[:-1]) // 1024
+            if v.endswith("M"): return int(v[:-1])
+            if v.endswith("G"): return int(v[:-1]) * 1024
+            return int(v) // (1024 * 1024)
+        except: return 0
+
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  CHECKS                                                          ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    # ── Node overview (always printed, not just issues) ───────────────────────────
+    def node_overview(node_items: list) -> List[Dict]:
+        """Returns a structured overview of every node (for the summary table).
+        Accepts pre-fetched node items to avoid a second API call."""
+        rows = []
+        for node in node_items:
+            name    = node.metadata.name
+            alloc   = node.status.allocatable or {}
+            created = node.metadata.creation_timestamp
+
+            conditions = {c.type: c.status for c in (node.status.conditions or [])}
+            ready    = conditions.get("Ready") == "True"
+            disk_p   = conditions.get("DiskPressure") == "True"
+            mem_p    = conditions.get("MemoryPressure") == "True"
+            pid_p    = conditions.get("PIDPressure") == "True"
+
+            flags = []
+            if disk_p: flags.append(f"{R}DiskPressure{RS}")
+            if mem_p:  flags.append(f"{R}MemPressure{RS}")
+            if pid_p:  flags.append(f"{Y}PIDPressure{RS}")
+
+            rows.append({
+                "name":    name,
+                "ready":   ready,
+                "flags":   flags,
+                "cpu_m":   _cpu(alloc.get("cpu",    "0")),
+                "mem_mi":  _mem(alloc.get("memory", "0")),
+                "age":     _age(created),
+            })
+        return rows
+
+
+    # ── Nodes ─────────────────────────────────────────────────────────────────────
+    def check_nodes(node_items: list) -> List[Dict]:
+        """Accepts pre-fetched node items."""
+        issues = []
+        for node in node_items:
+            n = node.metadata.name
+            for c in (node.status.conditions or []):
+                if c.type == "Ready" and c.status != "True":
+                    issues.append(_issue("CRITICAL", "NodeNotReady", f"node/{n}",
+                        f"Node is NOT READY — {(c.message or c.reason or '')[:100]}",
+                        action="Check node: kubectl describe node " + n))
+                if c.type == "DiskPressure" and c.status == "True":
+                    issues.append(_issue("CRITICAL", "NodeDiskPressure", f"node/{n}",
+                        "Active DISK PRESSURE — pods are being evicted right now",
+                        action=f"SSH to node, run: crictl rmi --prune && crictl rm $(crictl ps -a --state exited -q)"))
+                if c.type == "MemoryPressure" and c.status == "True":
+                    issues.append(_issue("CRITICAL", "NodeMemoryPressure", f"node/{n}",
+                        "Active MEMORY PRESSURE"))
+                if c.type == "PIDPressure" and c.status == "True":
+                    issues.append(_issue("WARNING", "NodePIDPressure", f"node/{n}",
+                        "Active PID PRESSURE"))
+        return issues
+
+
+    # ── Pods ──────────────────────────────────────────────────────────────────────
+    def check_pods(pod_items: list) -> List[Dict]:
+        """Accepts pre-fetched pod items to avoid duplicate API calls."""
+        issues = []
+        old_fail  = _now() - timedelta(hours=OLD_FAILED_POD_HOURS)
+        old_pend  = _now() - timedelta(minutes=PENDING_MINUTES)
+
+        for pod in pod_items:
+            ns, name = pod.metadata.namespace, pod.metadata.name
+            phase    = pod.status.phase or ""
+            reason   = pod.status.reason or ""
+            created  = pod.metadata.creation_timestamp
+
+            # ── Evicted ───────────────────────────────────────────────────────
+            if phase == "Failed" and reason == "Evicted":
+                msg = (pod.status.message or "")[:200]
+                issues.append(_issue("CRITICAL", "PodEvicted", f"{ns}/{name}", msg,
+                    when=created,
+                    action=f"kubectl delete pod {name} -n {ns}"))
+                continue
+
+            # ── Other failed pods not cleaned up ──────────────────────────────
+            if phase == "Failed":
+                if created and created.replace(tzinfo=timezone.utc) < old_fail:
+                    issues.append(_issue("WARNING", "DeadPodNotCleaned", f"{ns}/{name}",
+                        f"Failed pod sitting for {_age(created)} — disk artifact on node",
+                        when=created,
+                        action=f"kubectl delete pod {name} -n {ns}"))
+                continue
+
+            # ── Stuck Pending ─────────────────────────────────────────────────
+            if phase == "Pending":
+                if created and created.replace(tzinfo=timezone.utc) < old_pend:
+                    issues.append(_issue("WARNING", "PodPendingTooLong", f"{ns}/{name}",
+                        f"Stuck Pending for {_age(created)} — check resources/nodeSelector/PVC/image",
+                        when=created,
+                        action=f"kubectl describe pod {name} -n {ns}"))
+                continue
+
+            # ── Container-level ───────────────────────────────────────────────
+            for cs in (pod.status.container_statuses or []):
+                cn = cs.name
+
+                if cs.state and cs.state.waiting:
+                    wr = cs.state.waiting.reason or ""
+                    if wr in ("CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull"):
+                        issues.append(_issue("CRITICAL", wr, f"{ns}/{name}",
+                            f"Container '{cn}' — {cs.state.waiting.message or wr}",
+                            when=created,
+                            action=f"kubectl logs {name} -n {ns} -c {cn} --previous"))
+
+                if cs.state and cs.state.terminated:
+                    if (cs.state.terminated.reason or "") == "ContainerStatusUnknown":
+                        issues.append(_issue("WARNING", "ContainerStatusUnknown", f"{ns}/{name}",
+                            f"Container '{cn}' Unknown state — orphaned after node failure",
+                            when=created,
+                            action=f"kubectl delete pod {name} -n {ns}"))
+
+                if cs.last_state and cs.last_state.terminated:
+                    if cs.last_state.terminated.reason == "OOMKilled":
+                        limit_mem = ""
+                        for c in (pod.spec.containers or []):
+                            if c.name == cn and c.resources and c.resources.limits:
+                                m = c.resources.limits.get("memory", "")
+                                if m: limit_mem = f" (current limit: {m})"
+                        issues.append(_issue("CRITICAL", "OOMKilled", f"{ns}/{name}",
+                            f"Container '{cn}' was OOMKilled{limit_mem} — increase memory limit",
+                            when=created,
+                            action=f"kubectl top pod {name} -n {ns}"))
+
+                if cs.restart_count and cs.restart_count >= RESTART_THRESHOLD:
+                    sev = "CRITICAL" if cs.restart_count >= RESTART_THRESHOLD * 4 else "WARNING"
+                    issues.append(_issue(sev, "HighRestartCount", f"{ns}/{name}",
+                        f"Container '{cn}' restarted {cs.restart_count}× — check logs for root cause",
+                        when=created,
+                        action=f"kubectl logs {name} -n {ns} -c {cn} --previous"))
+
+        return issues
+
+
+    # ── Kubernetes Events (cluster history) ───────────────────────────────────────
+    def check_events(core: client.CoreV1Api) -> List[Dict]:
+        """
+        Reads all Warning-type events from the last EVENTS_LOOKBACK_H hours.
+        This is the agent's 'cluster history awareness' — it shows what K8s
+        itself has been recording about problems across all namespaces.
+        """
+        issues  = []
+        cutoff  = _now() - timedelta(hours=EVENTS_LOOKBACK_H)
+        seen    = set()  # deduplicate by (ns, name, reason)
+
+        try:
+            # limit=300 caps memory: events can number in the thousands on busy clusters.
+            # The API returns the most recent 300 (sorted by creation time server-side).
+            events = core.list_event_for_all_namespaces(
+                field_selector="type=Warning",
+                limit=300,
+            )
+        except ApiException:
+            return []
+
+        # Sort by last timestamp descending, then free the raw list
+        sorted_events = sorted(
+            [e for e in events.items if e.last_timestamp],
+            key=lambda e: e.last_timestamp,
+            reverse=True,
+        )
+        del events  # free the full response object
+
+        for ev in sorted_events:
+            ts = ev.last_timestamp
+            if ts and ts.replace(tzinfo=timezone.utc) < cutoff:
+                break  # older than lookback window
+
+            ns   = ev.metadata.namespace or ev.involved_object.namespace or "?"
+            obj  = ev.involved_object.name or "?"
+            kind = (ev.involved_object.kind or "").lower()
+            reason = ev.reason or "Unknown"
+            msg    = (ev.message or "")[:180]
+            count  = ev.count or 1
+
+            key = (ns, obj, reason)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            resource_str = f"{ns}/{obj}" if kind in ("pod","deployment","replicaset","node","persistentvolumeclaim") \
+                           else f"{ns}/{kind}/{obj}"
+
+            # Map K8s event reasons to severity
+            if reason in ("Evicting", "Evicted", "OOMKilling", "SystemOOM", "FreeDiskSpaceFailed",
+                          "NodeNotReady", "NodeHasDiskPressure", "NodeHasInsufficientMemory"):
+                sev = "CRITICAL"
+            elif reason in ("BackOff", "Failed", "FailedCreate", "FailedMount", "FailedScheduling",
+                            "FailedKillPod", "NetworkNotReady", "Unhealthy", "ProbeWarning",
+                            "NodeHasSufficientMemory", "ImageGCFailed", "EvictionThresholdMet"):
+                sev = "WARNING"
+            else:
+                sev = "INFO"
+
+            count_str = f" (×{count})" if count > 1 else ""
+            issues.append(_issue(sev, f"Event:{reason}", resource_str,
+                f"{msg}{count_str}",
+                when=ts))
+
+        return issues
+
+
+    # ── PersistentVolumeClaims ────────────────────────────────────────────────────
+    def check_pvcs(core: client.CoreV1Api) -> List[Dict]:
+        issues = []
+        old_pending = _now() - timedelta(minutes=15)
+
+        for pvc in core.list_persistent_volume_claim_for_all_namespaces(limit=200).items:
+            ns, name = pvc.metadata.namespace, pvc.metadata.name
+            phase    = pvc.status.phase or ""
+            created  = pvc.metadata.creation_timestamp
+
+            if phase == "Lost":
+                issues.append(_issue("CRITICAL", "PVCLost", f"{ns}/{name}",
+                    f"PVC is LOST — underlying volume is gone. Pods depending on it will fail.",
+                    action=f"kubectl describe pvc {name} -n {ns}"))
+
+            elif phase == "Pending":
+                if created and created.replace(tzinfo=timezone.utc) < old_pending:
+                    sc = pvc.spec.storage_class_name or "default"
+                    issues.append(_issue("WARNING", "PVCPending", f"{ns}/{name}",
+                        f"PVC stuck Pending for {_age(created)} (storageClass: {sc})",
+                        when=created,
+                        action=f"kubectl describe pvc {name} -n {ns}"))
+
+        return issues
+
+
+    # ── DaemonSets ────────────────────────────────────────────────────────────────
+    def check_daemonsets(apps: client.AppsV1Api) -> List[Dict]:
+        issues = []
+        for ds in apps.list_daemon_set_for_all_namespaces(limit=100).items:
+            ns, name = ds.metadata.namespace, ds.metadata.name
+            desired  = ds.status.desired_number_scheduled or 0
+            ready    = ds.status.number_ready or 0
+            if desired > 0 and ready < desired:
+                issues.append(_issue("WARNING", "DaemonSetNotReady", f"{ns}/{name}",
+                    f"DaemonSet has {ready}/{desired} pods ready",
+                    action=f"kubectl rollout status ds/{name} -n {ns}"))
+        return issues
+
+
+    # ── StatefulSets ──────────────────────────────────────────────────────────────
+    def check_statefulsets(apps: client.AppsV1Api) -> List[Dict]:
+        issues = []
+        for sts in apps.list_stateful_set_for_all_namespaces(limit=100).items:
+            ns, name = sts.metadata.namespace, sts.metadata.name
+            desired  = sts.spec.replicas or 1
+            ready    = sts.status.ready_replicas or 0
+            if ready < desired:
+                issues.append(_issue("WARNING", "StatefulSetNotReady", f"{ns}/{name}",
+                    f"StatefulSet has {ready}/{desired} pods ready",
+                    action=f"kubectl rollout status sts/{name} -n {ns}"))
+        return issues
+
+
+    # ── Jobs ──────────────────────────────────────────────────────────────────────
+    def check_jobs(batch: client.BatchV1Api) -> List[Dict]:
+        issues = []
+        for job in batch.list_job_for_all_namespaces(limit=200).items:
+            ns, name = job.metadata.namespace, job.metadata.name
+            failed   = job.status.failed or 0
+            created  = job.metadata.creation_timestamp
+
+            # Skip CronJob-managed jobs that already succeeded
+            succeeded = job.status.succeeded or 0
+            if succeeded > 0 and failed == 0:
+                continue
+
+            if failed > 0:
+                issues.append(_issue("WARNING", "JobFailed", f"{ns}/{name}",
+                    f"Job has {failed} failed attempt(s)",
+                    when=created,
+                    action=f"kubectl logs -l job-name={name} -n {ns} --tail=50"))
+
+        return issues
+
+
+    # ── Services with no endpoints ────────────────────────────────────────────────
+    def check_services(core: client.CoreV1Api) -> List[Dict]:
+        issues = []
+
+        # Build a map of endpoint readiness per service
+        ep_map: Dict[str, int] = {}
+        for ep in core.list_endpoints_for_all_namespaces(limit=300).items:
+            ns, name = ep.metadata.namespace, ep.metadata.name
+            ready = 0
+            for subset in (ep.subsets or []):
+                ready += len(subset.addresses or [])
+            ep_map[f"{ns}/{name}"] = ready
+
+        for svc in core.list_service_for_all_namespaces(limit=300).items:
+            ns, name = svc.metadata.namespace, svc.metadata.name
+            svc_type = svc.spec.type or "ClusterIP"
+
+            # Skip headless and ExternalName services
+            if svc.spec.cluster_ip in ("None", "") or svc_type == "ExternalName":
+                continue
+            if ns in SKIP_NS:
+                continue
+            # Skip kubernetes API service
+            if ns == "default" and name == "kubernetes":
+                continue
+
+            key   = f"{ns}/{name}"
+            ready = ep_map.get(key, -1)
+
+            if ready == 0 and svc.spec.selector:
+                issues.append(_issue("WARNING", "ServiceNoEndpoints", key,
+                    f"Service has a selector but 0 ready endpoints — selector may not match any pod",
+                    action=f"kubectl get endpoints {name} -n {ns}"))
+
+        return issues
+
+
+    # ── Old ReplicaSets (disk accumulation) ───────────────────────────────────────
+    def check_replicasets(apps: client.AppsV1Api) -> List[Dict]:
+        issues = []
+        cutoff = _now() - timedelta(days=OLD_RS_DAYS)
+        old_by_ns: Dict[str, List[str]] = {}
+
+        for rs in apps.list_replica_set_for_all_namespaces(limit=500).items:
+            desired = rs.spec.replicas or 0
+            ready   = rs.status.ready_replicas or 0
+            created = rs.metadata.creation_timestamp
+            if desired == 0 and ready == 0 and created:
+                if created.replace(tzinfo=timezone.utc) < cutoff:
+                    ns = rs.metadata.namespace
+                    old_by_ns.setdefault(ns, []).append(
+                        f"{rs.metadata.name}({_age(created)})"
+                    )
+
+        for ns, names in old_by_ns.items():
+            s = ", ".join(names[:4])
+            e = f" +{len(names)-4} more" if len(names) > 4 else ""
+            issues.append(_issue("WARNING", "OldReplicaSets", f"namespace/{ns}",
+                f"{len(names)} old 0/0/0 RSes holding image layers on disk: {s}{e}",
+                action=f"kubectl get rs -n {ns} | awk 'NR>1&&$2==0&&$3==0{{print $1}}' | xargs kubectl delete rs -n {ns}"))
+
+        return issues
+
+
+    # ── Deployment config issues ──────────────────────────────────────────────────
+    def check_deployments(apps: client.AppsV1Api) -> List[Dict]:
+        issues = []
+        for dep in apps.list_deployment_for_all_namespaces(limit=300).items:
+            ns, name = dep.metadata.namespace, dep.metadata.name
+            if ns in SKIP_NS:
+                continue
+
+            rhl = dep.spec.revision_history_limit
+            if rhl is not None and rhl > 3:
+                issues.append(_issue("INFO", "HighRevisionHistory", f"{ns}/{name}",
+                    f"revisionHistoryLimit={rhl} keeps {rhl} old RSes pinning images on disk",
+                    action=f"kubectl patch deploy {name} -n {ns} --type=json -p='[{{\"op\":\"replace\",\"path\":\"/spec/revisionHistoryLimit\",\"value\":2}}]'"))
+
+            for c in dep.spec.template.spec.containers:
+                cn = c.name
+                if c.image_pull_policy == "Always":
+                    issues.append(_issue("WARNING", "ImagePullPolicyAlways", f"{ns}/{name}",
+                        f"Container '{cn}' — imagePullPolicy:Always accumulates image layers on node disk",
+                        action=f"Set imagePullPolicy: IfNotPresent in deployment {name}"))
+
+                res  = c.resources or client.V1ResourceRequirements()
+                lims = res.limits   or {}
+                reqs = res.requests or {}
+
+                if "ephemeral-storage" not in lims:
+                    issues.append(_issue("WARNING", "NoEphemeralStorageLimit", f"{ns}/{name}",
+                        f"Container '{cn}' — no ephemeral-storage limit, uncontrolled disk use causes node evictions",
+                        action=f"Add: resources.limits.ephemeral-storage: 1Gi"))
+
+                if not reqs.get("cpu") and not reqs.get("memory"):
+                    issues.append(_issue("WARNING", "NoPodRequests", f"{ns}/{name}",
+                        f"Container '{cn}' — no CPU/memory requests. Scheduler can't place it properly and VPA can't track it",
+                        action=f"Add resource requests to deployment {name}"))
+
+        return issues
+
+
+    # ── Resource overcommit ───────────────────────────────────────────────────────
+    def check_overcommit(node_items: list, pod_items: list) -> List[Dict]:
+        """Accepts pre-fetched node and pod items — avoids two extra API calls."""
+        issues = []
+        alloc: Dict[str, Dict] = {}
+        for node in node_items:
+            a = node.status.allocatable or {}
+            alloc[node.metadata.name] = {
+                "cpu": _cpu(a.get("cpu",    "0")),
+                "mem": _mem(a.get("memory", "0")),
+            }
+
+        req = {n: {"cpu": 0, "mem": 0} for n in alloc}
+        lim = {n: {"cpu": 0, "mem": 0} for n in alloc}
+
+        for pod in pod_items:
+            n = pod.spec.node_name
+            if not n or n not in alloc: continue
+            if pod.status.phase not in ("Running", "Pending"): continue
+            for c in pod.spec.containers:
+                r = (c.resources.requests or {}) if c.resources else {}
+                l = (c.resources.limits   or {}) if c.resources else {}
+                req[n]["cpu"] += _cpu(r.get("cpu",    "0"))
+                req[n]["mem"] += _mem(r.get("memory", "0"))
+                lim[n]["cpu"] += _cpu(l.get("cpu",    "0"))
+                lim[n]["mem"] += _mem(l.get("memory", "0"))
+
+        for n, a in alloc.items():
+            if not a["mem"]: continue
+            mp = lim[n]["mem"] / a["mem"] * 100
+            cp = (lim[n]["cpu"] / a["cpu"] * 100) if a["cpu"] else 0
+            if mp > OVERCOMMIT_WARN_PCT:
+                issues.append(_issue("WARNING", "MemLimitOvercommit", f"node/{n}",
+                    f"Memory limits at {mp:.0f}% of allocatable "
+                    f"({lim[n]['mem']}Mi limits vs {a['mem']}Mi available) — OOM kills likely under load"))
+            if cp > OVERCOMMIT_WARN_PCT:
+                issues.append(_issue("WARNING", "CPULimitOvercommit", f"node/{n}",
+                    f"CPU limits at {cp:.0f}% of allocatable "
+                    f"({lim[n]['cpu']}m limits vs {a['cpu']}m available)"))
+
+        return issues
+
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  ORCHESTRATOR                                                    ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    _SEV_ORDER = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+
+    def run_all_checks() -> Dict[str, Any]:
+        core, apps, batch = _clients()
+        all_issues: List[Dict] = []
+
+        # ── Fetch expensive shared resources ONCE ────────────────────────────────
+        # Nodes and pods are reused by multiple checks — fetching once halves peak
+        # memory vs the old pattern where each check made its own API call.
+        try:
+            node_items = core.list_node(limit=100).items
+        except Exception as e:
+            node_items = []
+            all_issues.append(_issue("WARNING", "AgentError", "sre-agent", f"list_node failed: {e}"))
+
+        try:
+            # limit=500 covers clusters up to 500 pods; adjust via env if needed
+            pod_items = core.list_pod_for_all_namespaces(limit=500).items
+        except Exception as e:
+            pod_items = []
+            all_issues.append(_issue("WARNING", "AgentError", "sre-agent", f"list_pods failed: {e}"))
+
+        # ── Node overview (always printed) ────────────────────────────────────────
+        nodes_overview = []
+        try:
+            nodes_overview = node_overview(node_items)
+        except Exception as e:
+            all_issues.append(_issue("WARNING", "AgentError", "sre-agent", f"node_overview failed: {e}"))
+
+        # ── Run all checks ────────────────────────────────────────────────────────
+        # Checks that use shared data take pre-fetched lists, not the API client.
+        checks = [
+            ("Nodes",        check_nodes,       (node_items,)),
+            ("Pods",         check_pods,        (pod_items,)),
+            ("Events",       check_events,      (core,)),
+            ("PVCs",         check_pvcs,        (core,)),
+            ("DaemonSets",   check_daemonsets,  (apps,)),
+            ("StatefulSets", check_statefulsets,(apps,)),
+            ("Jobs",         check_jobs,        (batch,)),
+            ("Services",     check_services,    (core,)),
+            ("ReplicaSets",  check_replicasets, (apps,)),
+            ("Deployments",  check_deployments, (apps,)),
+            ("Overcommit",   check_overcommit,  (node_items, pod_items)),
+        ]
+
+        for label, fn, args in checks:
+            try:
+                found = fn(*args)
+                all_issues.extend(found)
+            except ApiException as e:
+                all_issues.append(_issue("WARNING", "AgentAPIError", "sre-agent",
+                    f"K8s API error in '{label}': {e.status} {e.reason}"))
+            except Exception as e:
+                all_issues.append(_issue("WARNING", "AgentError", "sre-agent",
+                    f"Check '{label}' failed: {e}"))
+
+        # ── Free the large shared lists explicitly ────────────────────────────────
+        del node_items
+        del pod_items
+        gc.collect()
+
+        all_issues.sort(key=lambda x: _SEV_ORDER.get(x.get("severity", "INFO"), 3))
+
+        summary = {
+            "critical": sum(1 for i in all_issues if i["severity"] == "CRITICAL"),
+            "warning":  sum(1 for i in all_issues if i["severity"] == "WARNING"),
+            "info":     sum(1 for i in all_issues if i["severity"] == "INFO"),
+        }
+
+        return {
+            "cluster":        CLUSTER_NAME,
+            "checked_at":     _now().isoformat(),
+            "summary":        summary,
+            "issues":         all_issues,
+            "nodes_overview": nodes_overview,
+            "healthy":        summary["critical"] == 0,
+        }
+
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  CLI PRINTER                                                     ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    def print_report(report: Dict[str, Any]):
+        now_str  = report["checked_at"][:19].replace("T", " ")
+        summary  = report["summary"]
+        issues   = report["issues"]
+        nodes    = report["nodes_overview"]
+
+        crit_c   = summary["critical"]
+        warn_c   = summary["warning"]
+        info_c   = summary["info"]
+
+        # ── Header ────────────────────────────────────────────────────────────────
+        print()
+        print(_line("━"))
+        cluster_line = f"  🛡  SRE AGENT  │  {CLUSTER_NAME}  │  {now_str} UTC"
+        print(f"{BD}{W}{cluster_line}{RS}")
+        print(_line("━"))
+
+        # ── Summary bar ───────────────────────────────────────────────────────────
+        crit_s = f"{R}{BD}{crit_c} Critical{RS}" if crit_c else f"{DM}{crit_c} Critical{RS}"
+        warn_s = f"{Y}{BD}{warn_c} Warning{RS}"  if warn_c else f"{DM}{warn_c} Warning{RS}"
+        info_s = f"{B}{info_c} Info{RS}"         if info_c else f"{DM}{info_c} Info{RS}"
+        health = f"{G}{BD}✅ HEALTHY{RS}" if report["healthy"] else f"{R}{BD}⚠ ISSUES FOUND{RS}"
+        print(f"\n  {health}   {crit_s}   {warn_s}   {info_s}\n")
+
+        # ── Node Overview ─────────────────────────────────────────────────────────
+        print(f"{BD}{DM}{'─'*W72}{RS}")
+        print(f" {BD}NODES ({len(nodes)}){RS}")
+        print(f"{BD}{DM}{'─'*W72}{RS}")
+        for nd in nodes:
+            name  = nd["name"].ljust(15)
+            status = f"{G}Ready{RS}  " if nd["ready"] else f"{R}NOT READY{RS}"
+            cpu   = f"cpu:{nd['cpu_m']}m"
+            mem   = f"mem:{nd['mem_mi']}Mi"
+            age   = f"age:{nd['age']}"
+            flags = ("  " + "  ".join(nd["flags"])) if nd["flags"] else ""
+            print(f"  {name} {status} │ {DM}{cpu:12}{RS} │ {DM}{mem:16}{RS} │ {DM}{age}{RS}{flags}")
+
+        # ── Issues by severity ────────────────────────────────────────────────────
+        def _print_section(sev: str, label: str, color: str):
+            filtered = [i for i in issues if i["severity"] == sev]
+            if not filtered:
+                return
+            print(f"\n{BD}{color}{'─'*W72}")
+            print(f" {label} ({len(filtered)}){RS}")
+            print(f"{BD}{color}{'─'*W72}{RS}")
+            for iss in filtered:
+                # Show exact datetime + relative age when available
+                # e.g.  [2026-04-22 17:30:15 UTC]  (14d ago)
+                if "ts" in iss and "age" in iss:
+                    time_str = f"{DM}[{iss['ts']}]  ({iss['age']} ago){RS}"
+                elif "ts" in iss:
+                    time_str = f"{DM}[{iss['ts']}]{RS}"
+                elif "age" in iss:
+                    time_str = f"{DM}(age: {iss['age']}){RS}"
+                else:
+                    time_str = ""
+
+                check_col = f"{BD}{color}{iss['check']:<28}{RS}"
+                res_col   = f"{C}{iss['resource']}{RS}"
+                print(f"  {check_col} {res_col}")
+                if time_str:
+                    print(f"  {'':28} {time_str}")
+                print(f"  {DM}{'':28}{RS} {iss['message']}")
+                if "action" in iss:
+                    print(f"  {DM}{'':28} → {iss['action']}{RS}")
+                print()
+
+        _print_section("CRITICAL", "🔴  CRITICAL", R)
+        _print_section("WARNING",  "🟡  WARNING",  Y)
+        _print_section("INFO",     "ℹ   INFO",      B)
+
+        # ── No issues ─────────────────────────────────────────────────────────────
+        if not issues:
+            print(f"\n  {G}{BD}All checks passed — cluster looks healthy!{RS}\n")
+
+        # ── Quick Actions (if critical issues) ────────────────────────────────────
+        actions = [i["action"] for i in issues if "action" in i and i["severity"] == "CRITICAL"]
+        if actions:
+            print(f"{BD}{DM}{'─'*W72}{RS}")
+            print(f" {BD}QUICK ACTIONS (Critical){RS}")
+            print(f"{BD}{DM}{'─'*W72}{RS}")
+            for act in actions[:8]:
+                print(f"  {Y}${RS}  {act}")
+            print()
+
+        print(_line("━"))
+        print(f"  {DM}Next check in {CHECK_INTERVAL}s  │  Checks: nodes,pods,events,pvcs,ds,sts,jobs,svc,rs,deploy,overcommit{RS}")
+        print(_line("━"))
+        print()
+
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  SLACK                                                           ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    _SE = {"CRITICAL": "🔴", "WARNING": "🟡", "INFO": "ℹ️"}
+
+
+    def send_slack(report: Dict[str, Any]):
+        if not SLACK_WEBHOOK_URL:
+            return
+        issues  = report["issues"]
+        summary = report["summary"]
+        if not issues:
+            return
+
+        icon = "🔴" if summary["critical"] else "🟡"
+        ts   = report["checked_at"][:19].replace("T", " ")
+
+        blocks = [
+            {"type": "header",
+             "text": {"type": "plain_text",
+                      "text": f"{icon} SRE Alert — {CLUSTER_NAME}"}},
+            {"type": "section",
+             "fields": [
+                 {"type": "mrkdwn", "text": f"*🔴 Critical:* {summary['critical']}"},
+                 {"type": "mrkdwn", "text": f"*🟡 Warning:* {summary['warning']}"},
+                 {"type": "mrkdwn", "text": f"*ℹ️ Info:* {summary['info']}"},
+                 {"type": "mrkdwn", "text": f"*🕒 At:* {ts} UTC"},
+             ]},
+            {"type": "divider"},
+        ]
+
+        for i, iss in enumerate(issues):
+            if i >= 20:
+                blocks.append({"type": "section",
+                               "text": {"type": "mrkdwn",
+                                        "text": f"_…and {len(issues)-20} more issues._"}})
+                break
+            em  = _SE.get(iss["severity"], "•")
+            # Show exact time + relative age in Slack too
+            if "ts" in iss and "age" in iss:
+                time_note = f"  `{iss['ts']}`  _({iss['age']} ago)_"
+            elif "ts" in iss:
+                time_note = f"  `{iss['ts']}`"
+            elif "age" in iss:
+                time_note = f"  _({iss['age']} ago)_"
+            else:
+                time_note = ""
+            act = f"\n  → `{iss['action']}`" if "action" in iss and iss["severity"] == "CRITICAL" else ""
+            blocks.append({"type": "section",
+                           "text": {"type": "mrkdwn",
+                                    "text": (f"{em} *{iss['check']}* — `{iss['resource']}`{time_note}\n"
+                                             f"{iss['message']}{act}")}})
+
+        try:
+            r = requests.post(SLACK_WEBHOOK_URL, json={"blocks": blocks}, timeout=10)
+            if r.status_code != 200:
+                print(f"[sre-agent] Slack error: {r.status_code} {r.text[:100]}", file=sys.stderr)
+        except Exception as e:
+            print(f"[sre-agent] Slack failed: {e}", file=sys.stderr)
+
+
+    # ╔══════════════════════════════════════════════════════════════════╗
+    # ║  ENTRY POINT                                                     ║
+    # ╚══════════════════════════════════════════════════════════════════╝
+
+    def run_once():
+        """Run all checks, print full report, send Slack if issues found."""
+        report = run_all_checks()
+        print_report(report)
+        send_slack(report)
+        return report
+
+
+    def run_loop():
+        """
+        Continuous loop with disk-conscious logging:
+
+        ● When issues exist (Critical or Warning):
+            → Print the full detailed report to stdout  (~50 lines)
+            → Send Slack alert
+
+        ● When cluster is healthy:
+            → Print a single compact line  (~1 line)
+            → No Slack alert
+
+        This keeps container log growth minimal during normal operations.
+        A healthy cluster at 5-min interval produces ~288 lines/day instead
+        of ~14,400 lines/day with a full report every cycle.
+        """
+        ts_start = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"[{ts_start}] SRE Agent started — cluster: {CLUSTER_NAME}  interval: {CHECK_INTERVAL}s")
+
+        while True:
+            try:
+                report   = run_all_checks()
+                s        = report["summary"]
+                ts_now   = report["checked_at"][:19].replace("T", " ")
+                n_nodes  = len(report["nodes_overview"])
+
+                if s["critical"] > 0 or s["warning"] > 0:
+                    # ── Issues found: full report ──────────────────────────────
+                    print_report(report)
+                    send_slack(report)
+                else:
+                    # ── All clear: single compact line (saves disk space) ──────
+                    info_s = f"  {s['info']} info" if s["info"] else ""
+                    print(
+                        f"[{ts_now} UTC] {G}✅ All clear{RS}"
+                        f"  nodes:{n_nodes}{info_s}"
+                        f"  next:{CHECK_INTERVAL}s"
+                    )
+
+            except Exception as e:
+                ts_err = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"[{ts_err}] [sre-agent] Cycle error: {e}", file=sys.stderr)
+
+            time.sleep(CHECK_INTERVAL)
+
+
+    if __name__ == "__main__":
+        if "--once" in sys.argv:
+            run_once()
+        else:
+            run_loop()
+
