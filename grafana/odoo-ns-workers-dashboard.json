@@ -1,0 +1,1005 @@
+{
+  "title": "Odoo Workers \u2014 Per Namespace (Sidecar)",
+  "uid": "odoo-ns-workers",
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "\u2139\ufe0f Per-Namespace Worker Visibility",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Metrics come from a **process-exporter sidecar** running inside each Odoo pod (`shareProcessNamespace: true`). Each sidecar sees only its own pod's processes, giving clean per-namespace / per-pod isolation.\n\n| Group | Typical count | Contents |\n|---|---|---|\n| `odoo_workers` | workers + 2 | 1 master + N HTTP workers + 1 cron |\n| `odoo_gevent` | 1 | Longpolling / bus / live-chat |"
+      },
+      "datasource": null
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "\ud83d\udc77 Live Worker Counts \u2014 By Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "HTTP Workers (est.)",
+      "description": "Estimated HTTP worker count = odoo_workers \u2212 2 (master + cron overhead). With workers=7, expect 7.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(clamp_min(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"} - 2, 0))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Cron Worker",
+      "description": "Odoo forks exactly 1 cron worker per deployment. Cannot be isolated via /proc (same cmdline). Always 1.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "vector(1)",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Gevent Workers",
+      "description": "Longpolling / bus / live-chat. Distinguishable by 'gevent' argument. Expect 1 per Odoo instance.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Total Odoo Processes",
+      "description": "master + N HTTP workers + cron. With workers=7 \u2192 9 processes per pod.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Namespaces with Odoo",
+      "description": "Number of distinct namespaces currently running Odoo workers.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "count(count by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Pods Monitored",
+      "description": "Number of Odoo pods currently being scraped (sidecar active).",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "count(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"})",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "\ud83d\udcc8 Worker Count Over Time \u2014 Dead Worker Detection",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Total Odoo Processes Per Pod \u2014 Drop = Worker Died",
+      "description": "A drop below workers+2 means a worker crashed. Odoo master should respawn it within seconds.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}",
+          "legendFormat": "{{odoo_namespace}} / {{odoo_pod}}",
+          "refId": "A"
+        },
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}",
+          "legendFormat": "{{odoo_namespace}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Workers Per Namespace (sum)",
+      "description": "Total odoo_workers across all pods in each namespace.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} workers",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "\ud83d\udda5 CPU Consumption Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "collapsed": false
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "CPU Usage \u2014 Odoo Workers by Namespace",
+      "description": "Rate of CPU seconds consumed by all Odoo worker processes grouped by namespace.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{odoo_namespace}} workers",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (odoo_namespace)(rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{odoo_namespace}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "CPU Per Individual HTTP Worker (est.) by Namespace",
+      "description": "Total namespace CPU \u00f7 estimated HTTP worker count. Higher = each worker is busier.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}[$__rate_interval])) / clamp_min(sum by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}) - 2, 1)",
+          "legendFormat": "{{odoo_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "\ud83e\udde0 Memory (RSS) Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "collapsed": false
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "RSS Memory \u2014 Odoo Workers by Namespace",
+      "description": "Resident Set Size of all Odoo worker processes per namespace.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 27
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_memory_bytes{groupname=\"odoo_workers\",memtype=\"resident\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} workers",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_memory_bytes{groupname=\"odoo_gevent\",memtype=\"resident\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "RSS Per Individual Worker (est.) by Namespace",
+      "description": "Total namespace RSS \u00f7 estimated HTTP worker count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 27
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_memory_bytes{groupname=\"odoo_workers\",memtype=\"resident\",odoo_namespace=~\"$namespace\"}) / clamp_min(sum by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}) - 2, 1)",
+          "legendFormat": "{{odoo_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "\ud83d\udcc2 Open File Descriptors (Connection Proxy)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Open FDs by Namespace",
+      "description": "Total open file descriptors for all Odoo workers per namespace. High FDs = high active connections.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_open_filedesc{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} workers",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_open_filedesc{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\"})",
+          "legendFormat": "{{odoo_namespace}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "FDs Per Individual Worker (est.) by Namespace",
+      "description": "Open FDs \u00f7 estimated HTTP worker count. Proxy for requests being handled per worker.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "sum by (odoo_namespace)(namedprocess_namegroup_open_filedesc{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}) / clamp_min(sum by (odoo_namespace)(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}) - 2, 1)",
+          "legendFormat": "{{odoo_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "\u23f1 Worker Uptime \u2014 Crash Detection",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "collapsed": false
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Worker Oldest Process Age (drop = crash + respawn)",
+      "description": "Age of the oldest process in each group. A sudden drop to near-zero means the master respawned a crashed worker.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 45
+      },
+      "targets": [
+        {
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}",
+          "legendFormat": "{{odoo_namespace}} / {{odoo_pod}} workers",
+          "refId": "A"
+        },
+        {
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\", odoo_pod=~\"$pod\"}",
+          "legendFormat": "{{odoo_namespace}} / {{odoo_pod}} gevent",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "\ud83d\udccb Namespace \u00d7 Pod Snapshot",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 53
+      },
+      "collapsed": false
+    },
+    {
+      "id": 71,
+      "type": "table",
+      "title": "All Namespaces \u2014 Workers \u00d7 CPU \u00d7 Memory \u00d7 FDs",
+      "description": "Instant snapshot of all Odoo pods with process metrics. Sort any column to find the busiest.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 54
+      },
+      "targets": [
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}",
+          "legendFormat": "Workers",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "clamp_min(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"} - 2, 0)",
+          "legendFormat": "HTTP Workers (est.)",
+          "refId": "B",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_gevent\",odoo_namespace=~\"$namespace\"}",
+          "legendFormat": "Gevent",
+          "refId": "C",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}[5m])",
+          "legendFormat": "CPU Rate",
+          "refId": "D",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_workers\",memtype=\"resident\",odoo_namespace=~\"$namespace\"}",
+          "legendFormat": "RSS Bytes",
+          "refId": "E",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "namedprocess_namegroup_open_filedesc{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}",
+          "legendFormat": "Open FDs",
+          "refId": "F",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_workers\",odoo_namespace=~\"$namespace\"}",
+          "legendFormat": "Uptime (s)",
+          "refId": "G",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        }
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Workers",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "service": true,
+              "pod": true
+            }
+          }
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "pluginId": "prometheus",
+        "label": "Datasource"
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "label": "Namespace",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "query": {
+          "query": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\"}, odoo_namespace)",
+          "refId": "Q"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "pod",
+        "type": "query",
+        "label": "Pod",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "query": {
+          "query": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\", odoo_namespace=~\"$namespace\"}, odoo_pod)",
+          "refId": "Q"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "tags": [
+    "odoo",
+    "workers",
+    "process-exporter",
+    "namespace"
+  ]
+}

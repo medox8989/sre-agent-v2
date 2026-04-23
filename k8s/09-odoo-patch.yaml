@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# 09-odoo-patch.yaml — Patch to add process-exporter sidecar to Odoo pods
+#
+# Apply per namespace:
+#   kubectl patch deployment hafedh-odoo -n hafedh --patch-file k8s/09-odoo-patch.yaml
+#   kubectl patch deployment sadan-odoo  -n sadan  --patch-file k8s/09-odoo-patch.yaml
+#
+# To REMOVE the sidecar:
+#   kubectl patch deployment hafedh-odoo -n hafedh --type=json \
+#     -p='[{"op":"remove","path":"/spec/template/spec/shareProcessNamespace"},
+#          {"op":"remove","path":"/spec/template/spec/containers/1"}]'
+# ══════════════════════════════════════════════════════════════════════════════
+spec:
+  template:
+    metadata:
+      labels:
+        # PodMonitor selector — marks this pod for process-exporter scraping
+        sre.io/process-exporter: "true"
+    spec:
+      # Required: lets the sidecar see Odoo's processes via shared /proc
+      shareProcessNamespace: true
+      containers:
+        - name: process-exporter
+          image: docker.io/ncabatoff/process-exporter:0.7.10
+          args:
+            - -config.path=/config/config.yml
+            - -web.listen-address=:9256
+            # No --procfs flag — reads the shared pod /proc by default
+          ports:
+            - name: proc-metrics
+              containerPort: 9256
+              protocol: TCP
+          volumeMounts:
+            - name: proc-exporter-config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu:    10m
+              memory: 32Mi
+            limits:
+              cpu:    50m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: false   # needs root to read /proc of other processes
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9256 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9256 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: proc-exporter-config
+          configMap:
+            name: process-exporter-config   # created by 09-odoo-sidecar.yaml

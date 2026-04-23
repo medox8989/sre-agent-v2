@@ -1,0 +1,101 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# 09-odoo-sidecar.yaml — Per-namespace Odoo worker process metrics
+#
+# Why:
+#   The DaemonSet (08-process-exporter.yaml) sees all processes on a node but
+#   cannot tell which Kubernetes namespace they belong to — metrics only have
+#   a "node" label.
+#
+#   This sidecar runs INSIDE each Odoo pod. With shareProcessNamespace: true,
+#   it sees only that pod's own processes. Prometheus scrapes it and
+#   automatically adds namespace + pod labels → full per-namespace filtering.
+#
+# Deploy (run for EVERY Odoo namespace):
+#
+#   # 1. Create the ConfigMap in each Odoo namespace
+#   kubectl apply -f k8s/09-odoo-sidecar.yaml -n hafedh
+#   kubectl apply -f k8s/09-odoo-sidecar.yaml -n sadan
+#   # ... repeat for each namespace
+#
+#   # 2. Patch each Odoo deployment to add the sidecar (see patch below)
+#   kubectl patch deployment hafedh-odoo -n hafedh --patch-file k8s/09-odoo-patch.yaml
+#   kubectl patch deployment sadan-odoo  -n sadan  --patch-file k8s/09-odoo-patch.yaml
+#
+#   # 3. Apply the PodMonitor once (monitoring namespace)
+#   kubectl apply -f k8s/09-odoo-sidecar.yaml -n monitoring
+#
+# Grafana:
+#   Import grafana/odoo-ns-workers-dashboard.json for the namespace view.
+#   The original odoo-process-workers-dashboard.json (node view) still works.
+#
+# NOTE: Helm-managed deployments — add these values to your Helm values file
+#   to make the sidecar survive upgrades (see bottom of this file).
+# ══════════════════════════════════════════════════════════════════════════════
+
+---
+# ── 1. ConfigMap — same patterns, applied per Odoo namespace ─────────────────
+# Apply with: kubectl apply -f this-file -n <odoo-namespace>
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: process-exporter-config
+  # namespace: supplied via -n flag
+  labels:
+    app: odoo
+    component: process-exporter
+data:
+  config.yml: |
+    process_names:
+      # Gevent/longpolling — has "gevent" as second argument, always 1
+      - name: "odoo_gevent"
+        cmdline:
+          - '/usr/bin/odoo gevent'
+
+      # All other Odoo processes: 1 master + N HTTP workers + 1 cron = N+2
+      # HTTP worker count ≈ num_procs - 2
+      - name: "odoo_workers"
+        cmdline:
+          - '/usr/bin/odoo'
+
+---
+# ── 2. PodMonitor — tells Prometheus to scrape the sidecar in all Odoo pods ──
+# Apply with: kubectl apply -f this-file -n monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: odoo-process-exporter
+  namespace: monitoring
+  labels:
+    release: prometheus-stack    # must match your Prometheus serviceMonitorSelector
+spec:
+  namespaceSelector:
+    any: true                    # scrape Odoo pods in ALL namespaces
+  selector:
+    matchLabels:
+      sre.io/process-exporter: "true"   # we add this label to Odoo pods
+  podMetricsEndpoints:
+    - port: proc-metrics
+      interval: 30s
+      scrapeTimeout: 20s
+      relabelings:
+        # Keep namespace as-is (added automatically from pod metadata)
+        - sourceLabels: [__meta_kubernetes_pod_namespace]
+          targetLabel: odoo_namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: odoo_pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: odoo_app
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT PATCH — save as k8s/09-odoo-patch.yaml and apply per namespace
+#
+# This adds:
+#   1. shareProcessNamespace: true  — sidecar can see Odoo processes
+#   2. process-exporter sidecar     — scrapes /proc for this pod only
+#   3. sre.io/process-exporter: "true" label — matched by PodMonitor above
+#
+# Apply:
+#   kubectl patch deployment <name> -n <namespace> --patch-file k8s/09-odoo-patch.yaml
+# ══════════════════════════════════════════════════════════════════════════════

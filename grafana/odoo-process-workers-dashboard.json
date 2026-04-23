@@ -1624,7 +1624,7 @@
         "label": "Node (= Odoo Instance)",
         "options": [],
         "query": {
-          "query": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\"}, node)",
+          "query": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_workers\"}, node)",
           "refId": "Q"
         },
         "refresh": 2,
