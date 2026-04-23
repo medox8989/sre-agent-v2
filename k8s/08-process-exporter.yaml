@@ -130,7 +130,7 @@ spec:
           effect: "NoExecute"
       containers:
         - name: process-exporter
-          image: docker.io/ncabatoff/process-exporter:0.8.3
+          image: docker.io/ncabatoff/process-exporter:0.7.10
           imagePullPolicy: IfNotPresent
           args:
             - --config.path=/config/config.yml
@@ -234,7 +234,7 @@ spec:
 #       containers:
 #         # ... your existing odoo container ...
 #         - name: process-exporter
-#           image: docker.io/ncabatoff/process-exporter:0.8.3
+#           image: docker.io/ncabatoff/process-exporter:0.7.10
 #           args:
 #             - --config.path=/config/config.yml
 #             - --web.listen-address=:9256
