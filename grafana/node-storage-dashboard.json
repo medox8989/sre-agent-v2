@@ -1,0 +1,593 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "stat",       "name": "Stat",        "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "table",      "name": "Table",       "version": "" },
+    { "type": "panel", "id": "gauge",      "name": "Gauge",       "version": "" }
+  ],
+  "description": "Node filesystem usage by mount path, container overlay storage, PVC/PV inventory and disk I/O across all nodes.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100,
+      "title": "💿 Cluster Disk Overview", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 }, "id": 1,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center" },
+      "title": "Total Disk Capacity",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(node_filesystem_size_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot.*\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null },
+          { "color": "yellow", "value": 53687091200 },
+          { "color": "red",   "value": 107374182400 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 }, "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center" },
+      "title": "Total Disk Used",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(node_filesystem_size_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\",mountpoint!~\"/boot.*\"} - node_filesystem_avail_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\",mountpoint!~\"/boot.*\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "yellow", "value": 0.7 },
+          { "color": "orange", "value": 0.85 },
+          { "color": "red",    "value": 0.95 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 }, "id": 3,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "Avg Disk Used %",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "avg(1 - node_filesystem_avail_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\",mountpoint=\"/\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "orange", "value": 1 },
+          { "color": "red",    "value": 3 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 }, "id": 4,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "Nodes Disk > 80%",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "count(1 - node_filesystem_avail_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay|fuse.*\",mountpoint=\"/\"} > 0.8) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "orange", "value": 1 },
+          { "color": "red",    "value": 3 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 }, "id": 5,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "PVCs Used > 80%",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "count(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.8) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "yellow", "value": 1073741824 },
+          { "color": "red",    "value": 5368709120 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 }, "id": 6,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center" },
+      "title": "Container Overlay Used",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(container_fs_usage_bytes{container!=\"\", container!=\"POD\", instance=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 101,
+      "title": "📁 Disk Usage by Mount Path — All Nodes", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Every filesystem mount point on every node. This is your 'disk usage with paths' view. Sort by '% Used' to find the fullest volumes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Node" },
+            "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "Mount Path" },
+            "properties": [{ "id": "custom.width", "value": 220 }] },
+          { "matcher": { "id": "byName", "options": "FSType" },
+            "properties": [{ "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "Total" },
+            "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 110 }] },
+          { "matcher": { "id": "byName", "options": "Used" },
+            "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 110 }] },
+          { "matcher": { "id": "byName", "options": "Available" },
+            "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 110 }] },
+          { "matcher": { "id": "byName", "options": "% Used" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "custom.width", "value": 120 },
+              { "id": "custom.cellOptions", "value": { "mode": "lcd", "type": "gauge", "valueDisplayMode": "text" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green",  "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "orange", "value": 0.85 },
+                { "color": "red",    "value": 0.95 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 6 },
+      "id": 10,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "% Used" }] },
+      "title": "All Filesystems — Node × Mount Path × Usage",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "Value #A": "Total",
+            "Value #B": "Used",
+            "Value #C": "Available",
+            "Value #D": "% Used",
+            "instance": "Node",
+            "mountpoint": "Mount Path",
+            "fstype": "FSType"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["Node","Mount Path","FSType","Total","Used","Available","% Used"] } }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "node_filesystem_size_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "node_filesystem_size_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"} - node_filesystem_avail_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "node_filesystem_avail_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "1 - (node_filesystem_avail_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"} / node_filesystem_size_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot/efi\"})",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "D" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 }, "id": 102,
+      "title": "📈 Disk Usage Growth Over Time", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Root filesystem usage per node over time. Steady growth = logs/temp files accumulating or PVC filling. Sudden jump = large deployment, image pull, or data import.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 }, "id": 11,
+      "options": { "legend": { "calcs": ["last","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Root Filesystem (/) Used — Per Node",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "node_filesystem_size_bytes{instance=~\"$node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"} - node_filesystem_avail_bytes{instance=~\"$node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"}",
+        "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Per-mountpoint disk growth — shows which path is growing fastest. High growth on /var/lib/containerd = image accumulation. High growth on a PVC mount = app data growth.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 }, "id": 12,
+      "options": { "legend": { "calcs": ["last","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "All Mount Paths Used — Per Node",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "node_filesystem_size_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot.*\"} - node_filesystem_avail_bytes{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\", mountpoint!~\"/boot.*\"}",
+        "legendFormat": "{{instance}} — {{mountpoint}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Time to disk full at current fill rate — predict when a node will run out. 'Inf' = stable/shrinking. Values < 24h need immediate attention.",
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0,
+        "color": { "mode": "thresholds" },
+        "custom": { "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "orange", "value": 86400 },
+          { "color": "yellow", "value": 259200 },
+          { "color": "green",  "value": 604800 }
+        ]} } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 29 }, "id": 13,
+      "options": { "legend": { "calcs": ["last"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "⏳ Predicted Time to Disk Full (/ on each node)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "predict_linear(node_filesystem_avail_bytes{instance=~\"$node\", mountpoint=\"/\", fstype!~\"tmpfs|overlay\"}[6h], 86400*7) > 0",
+        "legendFormat": "{{instance}} (+7d forecast)", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }, "id": 103,
+      "title": "📦 Container Overlay Storage — Image Layers & Writable Layers", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Top containers by writable layer size. High values = container writing large logs/temp files to its root filesystem (ephemeral storage). This is what fills /var/lib/containerd on the node.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "namespace" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "pod" }, "properties": [{ "id": "custom.width", "value": 250 }] },
+          { "matcher": { "id": "byName", "options": "container" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "Writable Layer" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green",  "value": null },
+                { "color": "yellow", "value": 104857600 },
+                { "color": "orange", "value": 536870912 },
+                { "color": "red",    "value": 1073741824 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 38 }, "id": 20,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Writable Layer" }] },
+      "title": "Container Writable Layer Size (ephemeral disk usage per container)",
+      "type": "table",
+      "transformations": [
+        { "id": "labelsToFields", "options": { "mode": "columns" } },
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["namespace","pod","container","Value"] } } },
+        { "id": "filterByValue", "options": { "filters": [{ "config": { "id": "greater", "options": { "value": 0 } }, "fieldName": "Value" }], "match": "any", "type": "include" } },
+        { "id": "organize", "options": { "renameByName": { "Value": "Writable Layer" } } }
+      ],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "topk(30, container_fs_usage_bytes{instance=~\"$node\", container!=\"\", container!=\"POD\"})",
+        "instant": true, "format": "table", "legendFormat": "", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Total container writable layer usage per namespace over time. Spike = log storm, large data write, or import running.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 50 }, "id": 21,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "Container Overlay Usage Over Time — By Namespace",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (namespace) (container_fs_usage_bytes{instance=~\"$node\", container!=\"\", container!=\"POD\", namespace!=\"\"})",
+        "legendFormat": "{{namespace}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 }, "id": 104,
+      "title": "💽 PVC Storage — Used vs Capacity", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "All PersistentVolumeClaims with actual usage. These are your Odoo filestore, PostgreSQL data, and any other persistent volumes. Sort by '% Used' to find full ones.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Namespace" }, "properties": [{ "id": "custom.width", "value": 150 }] },
+          { "matcher": { "id": "byName", "options": "PVC" }, "properties": [{ "id": "custom.width", "value": 220 }] },
+          { "matcher": { "id": "byName", "options": "Capacity" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "Used" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "Available" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "% Used" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 130 },
+              { "id": "custom.cellOptions", "value": { "mode": "lcd", "type": "gauge", "valueDisplayMode": "text" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green",  "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "orange", "value": 0.85 },
+                { "color": "red",    "value": 0.95 }
+              ]}}
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Inodes Used %" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 110 },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green",  "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red",    "value": 0.9 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 59 }, "id": 30,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "% Used" }] },
+      "title": "PVC Usage — Namespace × PVC × Capacity × Used",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "Value #A": "Capacity",
+            "Value #B": "Used",
+            "Value #C": "Available",
+            "Value #D": "% Used",
+            "Value #E": "Inodes Used %",
+            "namespace": "Namespace",
+            "persistentvolumeclaim": "PVC"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["Namespace","PVC","Capacity","Used","Available","% Used","Inodes Used %"] } }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kubelet_volume_stats_capacity_bytes", "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kubelet_volume_stats_used_bytes", "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kubelet_volume_stats_available_bytes", "instant": true, "format": "table", "legendFormat": "", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes", "instant": true, "format": "table", "legendFormat": "", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "1 - (kubelet_volume_stats_inodes_free / kubelet_volume_stats_inodes)", "instant": true, "format": "table", "legendFormat": "", "refId": "E" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "PVC growth over time. Identify which PVC is growing fastest — typically Odoo filestore, PostgreSQL data, or log volumes.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 73 }, "id": 31,
+      "options": { "legend": { "calcs": ["last","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "PVC Used Bytes Over Time",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "kubelet_volume_stats_used_bytes",
+        "legendFormat": "{{namespace}} / {{persistentvolumeclaim}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Time to PVC full at current fill rate. Watch for any PVC with less than 3 days remaining.",
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 73 }, "id": 32,
+      "options": { "legend": { "calcs": ["last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "⏳ PVC Predicted Time to Full",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "predict_linear(kubelet_volume_stats_available_bytes[6h], 86400*7) > 0",
+        "legendFormat": "{{namespace}} / {{persistentvolumeclaim}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 82 }, "id": 105,
+      "title": "📊 PV Inventory — All PersistentVolumes", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Complete inventory of PersistentVolumes in the cluster with status and binding.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "PV" }, "properties": [{ "id": "custom.width", "value": 240 }] },
+          { "matcher": { "id": "byName", "options": "Capacity" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "Status" },
+            "properties": [
+              { "id": "custom.width", "value": 100 },
+              { "id": "mappings", "value": [{ "options": {
+                "Bound":     { "color": "green",  "text": "✅ Bound" },
+                "Available": { "color": "blue",   "text": "🔵 Available" },
+                "Released":  { "color": "yellow", "text": "🟡 Released" },
+                "Failed":    { "color": "red",    "text": "🔴 Failed" }
+              }, "type": "value" }]},
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Reclaim" }, "properties": [
+            { "id": "custom.width", "value": 100 },
+            { "id": "mappings", "value": [{ "options": {
+              "Delete": { "color": "red",   "text": "🗑 Delete" },
+              "Retain": { "color": "green", "text": "✅ Retain" }
+            }, "type": "value" }]},
+            { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+          ]}
+        ]
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 83 }, "id": 40,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": false, "displayName": "Status" }] },
+      "title": "PersistentVolume Inventory",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "persistentvolume": "PV",
+            "storageclass": "StorageClass",
+            "Value #A": "Capacity",
+            "Value #B": "Status",
+            "Value #C": "Reclaim"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["PV","StorageClass","Capacity","Status","Reclaim"] } }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_persistentvolume_capacity_bytes", "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_persistentvolume_status_phase", "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_persistentvolume_info", "instant": true, "format": "table", "legendFormat": "", "refId": "C" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 95 }, "id": 106,
+      "title": "⚡ Disk I/O Activity — Reads & Writes per Node", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Disk write throughput per node. Sustained high writes = active DB writes, Odoo filestore uploads, log storms, or imports. Correlate with CPU spikes.",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 96 }, "id": 50,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Disk Write Throughput — Per Node",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (instance) (rate(node_disk_written_bytes_total{instance=~\"$node\", device!~\"loop.*\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Disk read throughput per node. High reads = large file serving (Odoo PDF attachments), cache misses, or DB scans.",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 96 }, "id": 51,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Disk Read Throughput — Per Node",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (instance) (rate(node_disk_read_bytes_total{instance=~\"$node\", device!~\"loop.*\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Disk I/O utilization % (time the disk was busy). >80% sustained = disk bottleneck. Correlate with slow Odoo response times.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "yellow", "value": 0.6 },
+          { "color": "red",    "value": 0.8 }
+        ]} } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 104 }, "id": 52,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "Disk I/O Utilization % — Per Node (>80% = bottleneck)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "rate(node_disk_io_time_seconds_total{instance=~\"$node\", device!~\"loop.*\"}[$__rate_interval])",
+        "legendFormat": "{{instance}} — {{device}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 112 }, "id": 107,
+      "title": "🔢 Inode Usage — Risk of Filesystem Full Even With Free Space", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Inode exhaustion causes 'No space left on device' errors even when df shows free space. Common culprit: many small files (Odoo sessions, cache files, Kubernetes ConfigMaps).",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Node" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "Mount" }, "properties": [{ "id": "custom.width", "value": 180 }] },
+          { "matcher": { "id": "byName", "options": "Inodes Total" }, "properties": [{ "id": "custom.width", "value": 120 }] },
+          { "matcher": { "id": "byName", "options": "Inodes Used" }, "properties": [{ "id": "custom.width", "value": 120 }] },
+          { "matcher": { "id": "byName", "options": "% Inodes Used" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 130 },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green",  "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "orange", "value": 0.85 },
+                { "color": "red",    "value": 0.95 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 113 }, "id": 60,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "% Inodes Used" }] },
+      "title": "Inode Usage per Filesystem",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "Value #A": "Inodes Total",
+            "Value #B": "Inodes Free",
+            "Value #D": "% Inodes Used",
+            "instance": "Node",
+            "mountpoint": "Mount"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["Node","Mount","Inodes Total","Inodes Free","% Inodes Used"] } }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "node_filesystem_files{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "node_filesystem_files_free{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "1 - (node_filesystem_files_free{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\"} / node_filesystem_files{instance=~\"$node\", fstype!~\"tmpfs|overlay|fuse.*|squashfs|devtmpfs\"})",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "D" }
+      ]
+    }
+
+  ],
+  "refresh": "60s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["storage", "kubernetes", "nodes", "pvc", "sre"],
+  "templating": {
+    "list": [{
+      "current": { "selected": true, "text": "All", "value": "$__all" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "definition": "label_values(node_uname_info, instance)",
+      "hide": 0,
+      "includeAll": true,
+      "multi": true,
+      "name": "node",
+      "label": "Node",
+      "options": [],
+      "query": { "query": "label_values(node_filesystem_size_bytes, instance)", "refId": "Q" },
+      "refresh": 2,
+      "sort": 1,
+      "type": "query"
+    }]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Node Storage — Disk, PVC & I/O",
+  "uid": "node-storage-v1",
+  "version": 1
+}

@@ -1,0 +1,493 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "stat",       "name": "Stat",        "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "table",      "name": "Table",       "version": "" },
+    { "type": "panel", "id": "text",       "name": "Text",        "version": "" }
+  ],
+  "description": "Odoo worker PROCESS visibility — HTTPWorker, CronWorker, GeventWorker counts per node, CPU/memory per worker type, worker age, dead-worker detection. Requires process-exporter DaemonSet (k8s/08-process-exporter.yaml).",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+
+    {
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 }, "id": 200,
+      "options": {
+        "content": "<div style=\"font-family:monospace;font-size:11px;padding:6px 10px;background:#161b22;border-left:3px solid #58a6ff;border-radius:4px\">\n<b style=\"color:#79c0ff\">ℹ️ How to read this dashboard:</b>&nbsp;&nbsp;\nEach row = one node running Odoo. Each column = one worker TYPE (not one pod).<br>\nOdoo with <code>--workers 4</code> → 1 master + 4 HTTPWorker + 1 CronWorker + 1 GeventWorker = 7 OS processes per pod.<br>\n<b style=\"color:#f85149\">Worker count drop below expected</b> = a worker crashed and Odoo master has not yet replaced it.<br>\nFilter by <b>Node</b> to isolate a specific Odoo deployment (if each deployment is on its own node).\nFor per-namespace breakdown deploy the <b>sidecar</b> (see k8s/08-process-exporter.yaml).\n</div>",
+        "mode": "html"
+      },
+      "title": "",
+      "type": "text"
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 3 }, "id": 100,
+      "title": "👷 Odoo Worker Process Fleet — Live Counts", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Total HTTP worker processes running cluster-wide. Should equal sum of --workers N across all Odoo pods. Drop = workers crashed.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "green",  "value": 1 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 4 }, "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "HTTP Workers",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Cron workers running. Should be 1 per Odoo deployment (--max-cron-threads). Handles scheduled actions, email sending, and background jobs.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "green",  "value": 1 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 4 }, "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "Cron Workers",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_cron_worker\", node=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Gevent/Longpolling workers. Should be 1 per deployment. Handles /longpolling/poll — real-time notifications, instant messaging, live kanban updates.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "green",  "value": 1 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 4 }, "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "Gevent Workers",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_gevent_worker\", node=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Master processes = number of Odoo instances (pods) running on selected nodes. Each master supervises its own pool of workers.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "blue",  "value": 1 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 4 }, "id": 4,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "Odoo Masters (Instances)",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_master\", node=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HTTP Workers / Masters ratio = workers per Odoo instance. If Odoo is configured with --workers 4, this should be 4. Lower = workers died.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "red",    "value": null },
+          { "color": "orange", "value": 1 },
+          { "color": "green",  "value": 2 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 4 }, "id": 5,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "HTTP Workers / Master",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}) / sum(namedprocess_namegroup_num_procs{groupname=\"odoo_master\", node=~\"$node\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Active PostgreSQL backend connections = database sessions open right now. Each Odoo HTTP worker that is processing a request holds one or more DB connections.",
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green",  "value": null },
+          { "color": "yellow", "value": 20 },
+          { "color": "red",    "value": 50 }
+        ]} } },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 4 }, "id": 6,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+        "text": { "titleSize": 12, "valueSize": 36 } },
+      "title": "Postgres Backend Connections",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(namedprocess_namegroup_num_procs{groupname=\"postgres_backend\", node=~\"$node\"}) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "id": 101,
+      "title": "📊 Worker Count Over Time — Dead Worker Detection", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Worker process count over time per node. A DROP means workers died and Odoo master has not restarted them yet (or couldn't). Flat line at expected count = healthy. Zero = Odoo pod down.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto", "spanNulls": false } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 10 }, "id": 10,
+      "options": { "legend": { "calcs": ["min","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HTTP Worker Count Over Time — Per Node (drop = workers died)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+        "legendFormat": "HTTP — {{node}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "All worker types on one chart per node. Healthy: HTTP count stable, Cron=1, Gevent=1 per deployment. Any type dropping to 0 = that worker type died.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "auto", "spanNulls": false } } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 10 }, "id": 11,
+      "options": { "legend": { "calcs": ["min","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "All Worker Types — Count Per Node",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+          "legendFormat": "HTTPWorker — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_cron_worker\", node=~\"$node\"}",
+          "legendFormat": "CronWorker — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_gevent_worker\", node=~\"$node\"}",
+          "legendFormat": "GeventWorker — {{node}}", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_master\", node=~\"$node\"}",
+          "legendFormat": "Master — {{node}}", "refId": "D" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 19 }, "id": 102,
+      "title": "🖥️ CPU Consumption Per Worker Type", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "CPU seconds per second per worker type per node. This shows which WORKER TYPE is consuming CPU — not the aggregate pod CPU. HTTP workers spiking = heavy user requests. Cron worker spiking = background job running.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 20 }, "id": 20,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "CPU Usage — HTTP vs Cron vs Gevent (per node)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_http_worker\", node=~\"$node\"}[$__rate_interval])",
+          "legendFormat": "HTTPWorker — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_cron_worker\", node=~\"$node\"}[$__rate_interval])",
+          "legendFormat": "CronWorker — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_gevent_worker\", node=~\"$node\"}[$__rate_interval])",
+          "legendFormat": "GeventWorker — {{node}}", "refId": "C" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "CPU per HTTP worker (total HTTP worker CPU / number of HTTP workers). This is the average CPU load each individual HTTP worker is carrying. High = workers are CPU-saturated.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 0.85 }
+        ]} } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 20 }, "id": 21,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "CPU Per Individual HTTP Worker (total HTTP CPU ÷ worker count)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_http_worker\", node=~\"$node\"}[$__rate_interval]) / namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+        "legendFormat": "avg CPU/worker — {{node}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Total user+system CPU seconds consumed per second by all Odoo processes combined vs PostgreSQL. Shows the actual computational split between app tier and DB tier.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 29 }, "id": 22,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "CPU Split: All Odoo Workers vs PostgreSQL (per node)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (node) (rate(namedprocess_namegroup_cpu_seconds_total{groupname=~\"odoo.*\", node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "All Odoo — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (node) (rate(namedprocess_namegroup_cpu_seconds_total{groupname=~\"postgres.*\", node=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "PostgreSQL — {{node}}", "refId": "B" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }, "id": 103,
+      "title": "💾 Memory (RSS) Per Worker Type", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Resident Set Size (RSS) memory per worker type — what's actually in RAM. Steady growth = memory leak in that worker type. HTTP workers typically use 200-600 MB each depending on Odoo modules loaded.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 38 }, "id": 30,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "RSS Memory — HTTP vs Cron vs Gevent (per node)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_http_worker\", memtype=\"resident\", node=~\"$node\"}",
+          "legendFormat": "HTTPWorker RSS — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_cron_worker\", memtype=\"resident\", node=~\"$node\"}",
+          "legendFormat": "CronWorker RSS — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_gevent_worker\", memtype=\"resident\", node=~\"$node\"}",
+          "legendFormat": "GeventWorker RSS — {{node}}", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_master\", memtype=\"resident\", node=~\"$node\"}",
+          "legendFormat": "Master RSS — {{node}}", "refId": "D" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Memory per individual HTTP worker = total HTTP RSS / number of HTTP workers. This is how much RAM each single worker is consuming. Should be relatively stable. Growth = memory leak per-request.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 38 }, "id": 31,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "RSS Memory Per Individual HTTP Worker",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "namedprocess_namegroup_memory_bytes{groupname=\"odoo_http_worker\", memtype=\"resident\", node=~\"$node\"} / namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+        "legendFormat": "avg RSS/HTTP worker — {{node}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 }, "id": 104,
+      "title": "🔌 Open File Descriptors — Active Connection Load per Worker", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Open file descriptors per HTTP worker group = sum of all FDs across all HTTP workers. Each active HTTP connection, DB connection, and open file = 1 FD. High FD count = workers are under heavy load.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 }, "id": 40,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Open FDs per Worker Type (connection load proxy)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_open_filedesc{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+          "legendFormat": "HTTPWorker FDs — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_open_filedesc{groupname=\"odoo_cron_worker\", node=~\"$node\"}",
+          "legendFormat": "CronWorker FDs — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_open_filedesc{groupname=\"odoo_gevent_worker\", node=~\"$node\"}",
+          "legendFormat": "GeventWorker FDs — {{node}}", "refId": "C" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "FDs per individual HTTP worker = total FDs / worker count. Each worker should have ~10-30 FDs at moderate load (Python stdlib + DB connection + open request). Spike = that worker is handling many concurrent connections.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 100 }
+        ]} } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 }, "id": 41,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "FDs Per Individual HTTP Worker",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "namedprocess_namegroup_open_filedesc{groupname=\"odoo_http_worker\", node=~\"$node\"} / namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+        "legendFormat": "avg FDs/HTTP worker — {{node}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 }, "id": 105,
+      "title": "🕐 Worker Age — Crash & Restart Detection", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Time since the OLDEST worker process started. Stable/growing = workers are healthy. A sudden DROP back to near-zero = all workers of that type restarted (crash + respawn by master). Very young workers after a drop = just recovered from a crash.",
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 4, "lineWidth": 2, "showPoints": "auto", "spanNulls": false } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 57 }, "id": 50,
+      "options": { "legend": { "calcs": ["last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Worker Uptime (oldest start time) — drop = crash + respawn",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+          "legendFormat": "HTTPWorker age — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_cron_worker\", node=~\"$node\"}",
+          "legendFormat": "CronWorker age — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_gevent_worker\", node=~\"$node\"}",
+          "legendFormat": "GeventWorker age — {{node}}", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=\"odoo_master\", node=~\"$node\"}",
+          "legendFormat": "Master age — {{node}}", "refId": "D" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Thread count per worker type. HTTP workers are single-threaded — thread count should be 1. Cron and Gevent may have more. Unexpected spike = thread leak in a worker.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2, "showPoints": "auto", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 57 }, "id": 51,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Thread Count per Worker Type",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_thread_count{groupname=\"odoo_http_worker\", node=~\"$node\"}",
+          "legendFormat": "HTTPWorker threads — {{node}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_thread_count{groupname=\"odoo_cron_worker\", node=~\"$node\"}",
+          "legendFormat": "CronWorker threads — {{node}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_thread_count{groupname=\"odoo_gevent_worker\", node=~\"$node\"}",
+          "legendFormat": "GeventWorker threads — {{node}}", "refId": "C" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 66 }, "id": 106,
+      "title": "📋 Worker Snapshot — All Worker Types × All Nodes", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Instant view of all Odoo worker types per node — counts, CPU, memory, FDs. One row per worker_type × node combination. This is the 'who's running where and how heavy' view.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Node" }, "properties": [{ "id": "custom.width", "value": 180 }] },
+          { "matcher": { "id": "byName", "options": "Worker Type" },
+            "properties": [
+              { "id": "custom.width", "value": 160 },
+              { "id": "mappings", "value": [{ "options": {
+                "odoo_http_worker":   { "color": "green",  "text": "🟢 HTTPWorker" },
+                "odoo_cron_worker":   { "color": "yellow", "text": "🟡 CronWorker" },
+                "odoo_gevent_worker": { "color": "blue",   "text": "🔵 GeventWorker" },
+                "odoo_master":        { "color": "purple", "text": "🟣 Master" },
+                "postgres_backend":   { "color": "orange", "text": "🟠 PG Backend" }
+              }, "type": "value" }]},
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Count" },
+            "properties": [
+              { "id": "custom.width", "value": 70 },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null }, { "color": "green", "value": 1 }
+              ]}}
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "CPU %" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 100 },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "yellow", "value": 0.3 }, { "color": "red", "value": 0.8 }
+              ]}}
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "RSS Memory" }, "properties": [{ "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 120 }] },
+          { "matcher": { "id": "byName", "options": "Open FDs" }, "properties": [{ "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "Uptime" }, "properties": [{ "id": "unit", "value": "s" }, { "id": "custom.width", "value": 100 }] }
+        ]
+      },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 67 }, "id": 60,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": false, "displayName": "Worker Type" }] },
+      "title": "Worker Fleet Snapshot — Count × CPU × Memory × FDs × Uptime",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "groupname": "Worker Type",
+            "node": "Node",
+            "Value #A": "Count",
+            "Value #B": "CPU %",
+            "Value #C": "RSS Memory",
+            "Value #D": "Open FDs",
+            "Value #E": "Uptime"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["Node","Worker Type","Count","CPU %","RSS Memory","Open FDs","Uptime"] } }},
+        { "id": "filterByValue", "options": {
+          "filters": [{ "config": { "id": "greater", "options": { "value": 0 } }, "fieldName": "Count" }],
+          "match": "any", "type": "include"
+        }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_num_procs{groupname=~\"odoo.*|postgres.*\", node=~\"$node\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=~\"odoo.*|postgres.*\", node=~\"$node\"}[5m])",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_memory_bytes{groupname=~\"odoo.*|postgres.*\", memtype=\"resident\", node=~\"$node\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "namedprocess_namegroup_open_filedesc{groupname=~\"odoo.*|postgres.*\", node=~\"$node\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "time() - namedprocess_namegroup_oldest_start_time_seconds{groupname=~\"odoo.*\", node=~\"$node\"}",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "E" }
+      ]
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["odoo", "workers", "process", "kubernetes", "sre"],
+  "templating": {
+    "list": [{
+      "current": { "selected": true, "text": "All", "value": "$__all" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "definition": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\"}, node)",
+      "hide": 0,
+      "includeAll": true,
+      "multi": true,
+      "name": "node",
+      "label": "Node (= Odoo Instance)",
+      "options": [],
+      "query": { "query": "label_values(namedprocess_namegroup_num_procs{groupname=\"odoo_http_worker\"}, node)", "refId": "Q" },
+      "refresh": 2,
+      "sort": 1,
+      "type": "query"
+    }]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Odoo Worker Processes — HTTPWorker / CronWorker / GeventWorker",
+  "uid": "odoo-process-workers-v1",
+  "version": 1
+}

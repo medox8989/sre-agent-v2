@@ -1,0 +1,601 @@
+{
+  "__inputs": [{ "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "stat",       "name": "Stat",        "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "table",      "name": "Table",       "version": "" }
+  ],
+  "description": "Odoo worker fleet — per-worker CPU, memory, CPU throttling, HTTP traffic via nginx-ingress, filestore I/O, concurrent requests, scaling behavior and reliability.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "id": 100,
+      "title": "👷 Worker Fleet — Live Status", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 }, "id": 1,
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center" },
+      "title": "Running Workers",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "count(kube_pod_status_phase{phase=\"Running\", namespace=~\"$namespace\", pod=~\"$worker_regex\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 3 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 }, "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "Restarting (5m)",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "count(rate(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[5m]) > 0) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 0.6 }, { "color": "red", "value": 0.85 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 }, "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center" },
+      "title": "Avg CPU Usage",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "avg(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$worker_regex\", container!=\"\", container!=\"POD\"}[5m]))",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 }, "id": 4,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center" },
+      "title": "Total Memory Used",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$worker_regex\", container!=\"\", container!=\"POD\"})",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 }, "id": 5,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center" },
+      "title": "HTTP Req/s (Nginx)",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(rate(nginx_ingress_controller_requests{exported_namespace=~\"$namespace\"}[5m])) or sum(rate(nginx_ingress_controller_requests{namespace=~\"$namespace\"}[5m])) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 }, "id": 6,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "HTTP P95 Latency",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "histogram_quantile(0.95, sum(rate(nginx_ingress_controller_response_duration_seconds_bucket{exported_namespace=~\"$namespace\"}[5m])) by (le)) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 }, "id": 7,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center" },
+      "title": "HTTP Errors (5xx, 5m)",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(rate(nginx_ingress_controller_requests{exported_namespace=~\"$namespace\", status=~\"5..\"}[5m])) or sum(rate(nginx_ingress_controller_requests{namespace=~\"$namespace\", status=~\"5..\"}[5m])) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "orange", "value": 200 }, { "color": "red", "value": 350 }
+        ]} } },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 }, "id": 8,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center" },
+      "title": "Peak Concurrent Conn.",
+      "type": "stat",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum(nginx_ingress_controller_nginx_process_connections{state=\"active\", namespace=~\"$namespace\"}) or vector(0)",
+        "instant": true, "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "id": 101,
+      "title": "🖥️ CPU — Usage, Throttling & Limits per Worker", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "CPU cores used per worker pod. Each Odoo HTTP worker typically uses 0.2–0.8 cores at moderate load. Spikes to full core = heavy computation (report, import, heavy query).",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 }, "id": 10,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "CPU Usage per Worker Pod",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  rate(container_cpu_usage_seconds_total{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }[$__rate_interval])\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "CPU throttle % = time the container's CPU was artificially limited (cgroups). >20% throttling causes slow Odoo responses even when CPU usage looks low. Caused by CPU limits being too tight.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.25 }
+        ]} } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 }, "id": 11,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "CPU Throttling % per Worker (>20% = limits too tight → slow responses)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  rate(container_cpu_cfs_throttled_periods_total{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }[$__rate_interval])\n)\n/\nsum by (pod, namespace) (\n  rate(container_cpu_cfs_periods_total{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }[$__rate_interval])\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Total CPU usage all workers combined vs total CPU limits assigned. Hitting 100% of limit = workers are CPU-constrained. Gap below 100% = headroom available.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 2, "showPoints": "never", "spanNulls": true } },
+        "overrides": [
+          { "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } },
+              { "id": "custom.lineStyle", "value": { "dash": [8, 4], "fill": "dash" } }
+            ]}
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 15 }, "id": 12,
+      "options": { "legend": { "calcs": ["last"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "Total Worker CPU Used vs CPU Limit per Namespace",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (namespace) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$worker_regex\", container!=\"\", container!=\"POD\"}[$__rate_interval]))",
+          "legendFormat": "used — {{namespace}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (namespace) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"$worker_regex\", resource=\"cpu\"})",
+          "legendFormat": "limit — {{namespace}}", "refId": "B" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "id": 102,
+      "title": "💾 Memory — Usage, Limits & OOM Risk", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Memory working set per worker pod. Steady growth over hours = memory leak in Odoo worker (common with heavy customization or large datasets in session). Spike = large report or data import.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 24 }, "id": 20,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Memory Working Set per Worker Pod",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  container_memory_working_set_bytes{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Memory limit utilization % per worker. Approaching 100% = OOM kill risk. Workers at >90% will be killed by the OOM killer and restart — showing as CrashLoopBackOff.",
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 0.75 },
+          { "color": "orange", "value": 0.85 }, { "color": "red", "value": 0.95 }
+        ]} } },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 24 }, "id": 21,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Memory Limit Utilization % (>90% = OOM kill risk)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  container_memory_working_set_bytes{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }\n)\n/\nsum by (pod, namespace) (\n  kube_pod_container_resource_limits{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    resource=\"memory\"\n  }\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 }, "id": 103,
+      "title": "🌐 HTTP Traffic — Requests, Latency & Errors (Nginx Ingress)", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HTTP request rate per namespace via nginx ingress. Spikes = peak user load. Use this to correlate with CPU/memory spikes on worker pods.",
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 34 }, "id": 30,
+      "options": { "legend": { "calcs": ["mean","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HTTP Request Rate (req/s)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (exported_namespace) (rate(nginx_ingress_controller_requests{exported_namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{exported_namespace}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (namespace) (rate(nginx_ingress_controller_requests{namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}", "refId": "B" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HTTP response latency percentiles. P50 = typical user experience. P95/P99 = worst-case experience. >2s P95 for Odoo = worker overloaded or heavy query.",
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 4, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 }
+        ]} } },
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 34 }, "id": 31,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HTTP Response Latency (P50 / P95 / P99)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.50, sum by (le, exported_namespace) (rate(nginx_ingress_controller_response_duration_seconds_bucket{exported_namespace=~\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "P50 — {{exported_namespace}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, exported_namespace) (rate(nginx_ingress_controller_response_duration_seconds_bucket{exported_namespace=~\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "P95 — {{exported_namespace}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, sum by (le, exported_namespace) (rate(nginx_ingress_controller_response_duration_seconds_bucket{exported_namespace=~\"$namespace\"}[$__rate_interval])))",
+          "legendFormat": "P99 — {{exported_namespace}}", "refId": "C" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HTTP error rate broken down by status code. 4xx = client errors (bad requests, auth failures). 5xx = server errors (Odoo crashed, gateway timeout, worker unavailable).",
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 34 }, "id": 32,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HTTP Errors — 4xx / 5xx Rate",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (status) (rate(nginx_ingress_controller_requests{exported_namespace=~\"$namespace\", status=~\"4..\"}[$__rate_interval]))",
+          "legendFormat": "4xx — {{status}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (status) (rate(nginx_ingress_controller_requests{exported_namespace=~\"$namespace\", status=~\"5..\"}[$__rate_interval]))",
+          "legendFormat": "5xx — {{status}}", "refId": "B" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HTTP request size (inbound payload) and response size (outbound). Large request sizes = file uploads (Odoo attachments). Large response sizes = heavy report exports or large record sets.",
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 }, "id": 33,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HTTP Request / Response Size per Second",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (exported_namespace) (rate(nginx_ingress_controller_request_size_sum{exported_namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "req size — {{exported_namespace}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (exported_namespace) (rate(nginx_ingress_controller_response_size_sum{exported_namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "resp size — {{exported_namespace}}", "refId": "B" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Active nginx connections to Odoo backends. 'Active' = being processed. 'Waiting' = keep-alive idle. High active count with slow latency = workers are the bottleneck.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 }, "id": 34,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Nginx Active Connections (Concurrency)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(nginx_ingress_controller_nginx_process_connections{state=\"active\"})",
+          "legendFormat": "active", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(nginx_ingress_controller_nginx_process_connections{state=\"waiting\"})",
+          "legendFormat": "waiting (keep-alive)", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(nginx_ingress_controller_nginx_process_connections{state=\"writing\"})",
+          "legendFormat": "writing (sending response)", "refId": "C" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 }, "id": 104,
+      "title": "📁 Filestore I/O — Disk Writes, Reads & Network (Attachment Traffic)", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Disk write bytes per worker pod. High writes = Odoo saving attachments (PDF, images) to filestore, session writes, or log output. Sustained high = large batch upload or import running.",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 }, "id": 40,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Disk Writes per Worker (Filestore, Logs, Sessions)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  rate(container_fs_writes_bytes_total{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }[$__rate_interval])\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Disk reads per worker. High reads = serving large attachments (96 GiB PDFs), Odoo module reload, or cache-miss DB reads. Correlate with high network transmit (file serving).",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 8, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 }, "id": 41,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Disk Reads per Worker (File Serving, Module Load)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (\n  rate(container_fs_reads_bytes_total{\n    namespace=~\"$namespace\",\n    pod=~\"$worker_regex\",\n    container!=\"\", container!=\"POD\"\n  }[$__rate_interval])\n)",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Network inbound per worker (HTTP requests arriving + DB query responses). High = heavy user traffic. Network outbound (responses + DB writes) = large file downloads or report exports.",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 60 }, "id": 42,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Network Inbound per Worker (Requests + DB responses)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (rate(container_network_receive_bytes_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[$__rate_interval]))",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Network outbound per worker. Large outbound = serving PDF attachments, CSV exports, or large Odoo views with many records. If this is consistently high, consider CDN for static files.",
+      "fieldConfig": { "defaults": { "unit": "binBps", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 6, "lineWidth": 1, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 60 }, "id": 43,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Network Outbound per Worker (Responses, File Serving)",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (rate(container_network_transmit_bytes_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[$__rate_interval]))",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 68 }, "id": 105,
+      "title": "📈 Scaling — HPA, Pod Churn & Worker Lifecycle", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Worker pod count over time. Scale-up = HPA responding to load. Drops = evictions, OOM kills, or rollouts. Frequent pod churn = instability (memory leaks, probe failures).",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 }, "id": 50,
+      "options": { "legend": { "calcs": ["min","max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Running Worker Pod Count Over Time",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "count by (namespace) (kube_pod_status_phase{phase=\"Running\", namespace=~\"$namespace\", pod=~\"$worker_regex\"})",
+        "legendFormat": "{{namespace}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "HPA current vs desired vs max replicas. Current < desired for >2 min = node resource shortage preventing scale-out. Current = max sustained = capacity ceiling hit.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2, "showPoints": "auto", "spanNulls": true } },
+        "overrides": [
+          { "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "dash": [6, 3], "fill": "dash" } },
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+            ]}
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 69 }, "id": 51,
+      "options": { "legend": { "calcs": ["last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "HPA: Current / Desired / Max Replicas",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=~\"$namespace\"}",
+          "legendFormat": "current — {{namespace}}/{{horizontalpodautoscaler}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_horizontalpodautoscaler_status_desired_replicas{namespace=~\"$namespace\"}",
+          "legendFormat": "desired — {{namespace}}/{{horizontalpodautoscaler}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=~\"$namespace\"}",
+          "legendFormat": "max — {{namespace}}/{{horizontalpodautoscaler}}", "refId": "C" }
+      ]
+    },
+
+    { "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 77 }, "id": 106,
+      "title": "🔄 Reliability — Crashes, Restarts & Worker Health", "type": "row" },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Container restart events over time. Each jump = a crash. Steady slope = persistent crash loop. Correlate with OOM (memory limit panel) or probe timeouts.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "lineWidth": 2, "showPoints": "auto", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 78 }, "id": 60,
+      "options": { "legend": { "calcs": ["max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Container Restart Count Over Time",
+      "type": "timeseries",
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "expr": "sum by (pod, namespace) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[$__rate_interval]))",
+        "legendFormat": "{{namespace}} / {{pod}}", "refId": "A" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Pods in non-Running state. Persistent non-zero = deployment stuck, image pull failing, or resource shortage preventing scheduling.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0,
+        "color": { "mode": "palette-classic" },
+        "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 78 }, "id": 61,
+      "options": { "legend": { "calcs": ["max","last"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Workers Not Running (Pending / Failed / Unknown)",
+      "type": "timeseries",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(kube_pod_status_phase{phase=\"Pending\", namespace=~\"$namespace\", pod=~\"$worker_regex\"}) or vector(0)",
+          "legendFormat": "Pending", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(kube_pod_status_phase{phase=\"Failed\", namespace=~\"$namespace\", pod=~\"$worker_regex\"}) or vector(0)",
+          "legendFormat": "Failed", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "count(kube_pod_container_status_waiting_reason{reason=\"CrashLoopBackOff\", namespace=~\"$namespace\", pod=~\"$worker_regex\"}) or vector(0)",
+          "legendFormat": "CrashLoopBackOff", "refId": "C" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Snapshot of all worker pods — current CPU, memory, restart count, and status. Sort by CPU or Memory to immediately identify the overloaded worker.",
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "left", "minWidth": 80 },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Namespace" }, "properties": [{ "id": "custom.width", "value": 140 }] },
+          { "matcher": { "id": "byName", "options": "Pod" }, "properties": [{ "id": "custom.width", "value": 260 }] },
+          { "matcher": { "id": "byName", "options": "CPU (cores)" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" }, { "id": "custom.width", "value": 120 },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "yellow", "value": 0.5 }, { "color": "red", "value": 0.9 }
+              ]}}
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Memory" },
+            "properties": [
+              { "id": "unit", "value": "bytes" }, { "id": "custom.width", "value": 110 },
+              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "yellow", "value": 536870912 }, { "color": "red", "value": 1073741824 }
+              ]}}
+            ]
+          },
+          { "matcher": { "id": "byName", "options": "Net Rx" }, "properties": [{ "id": "unit", "value": "binBps" }, { "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "Net Tx" }, "properties": [{ "id": "unit", "value": "binBps" }, { "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "Restarts" },
+            "properties": [
+              { "id": "custom.width", "value": 80 },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null }, { "color": "orange", "value": 3 }, { "color": "red", "value": 10 }
+              ]}},
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 86 }, "id": 70,
+      "options": { "cellHeight": "sm", "footer": { "show": false }, "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "CPU (cores)" }] },
+      "title": "Worker Pod Snapshot — CPU / Memory / Network / Restarts",
+      "type": "table",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        { "id": "organize", "options": { "renameByName": {
+            "Value #A": "CPU (cores)", "Value #B": "Memory",
+            "Value #C": "Net Rx", "Value #D": "Net Tx", "Value #E": "Restarts",
+            "namespace": "Namespace", "pod": "Pod"
+          }}},
+        { "id": "filterFieldsByName", "options": { "include": { "names": ["Namespace","Pod","CPU (cores)","Memory","Net Rx","Net Tx","Restarts"] } }}
+      ],
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"$worker_regex\", container!=\"\", container!=\"POD\"}[5m]))",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (pod, namespace) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"$worker_regex\", container!=\"\", container!=\"POD\"})",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (pod, namespace) (rate(container_network_receive_bytes_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[5m]))",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (pod, namespace) (rate(container_network_transmit_bytes_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[5m]))",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (pod, namespace) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\", pod=~\"$worker_regex\"}[1h]))",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "E" }
+      ]
+    }
+
+  ],
+  "refresh": "30s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["odoo", "workers", "http", "kubernetes", "sre"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(kube_pod_info, namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "namespace",
+        "label": "Namespace",
+        "options": [],
+        "query": { "query": "label_values(kube_pod_info, namespace)", "refId": "Q" },
+        "regex": "/^(?!kube-system|kube-public|kube-node-lease|monitoring|cert-manager|ingress-nginx|nfs|sre-agent).*/",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": { "text": ".*odoo.*|.*worker.*", "value": ".*odoo.*|.*worker.*" },
+        "hide": 0,
+        "name": "worker_regex",
+        "label": "Worker Pod Pattern",
+        "options": [
+          { "selected": false, "text": "All pods", "value": ".*" },
+          { "selected": true,  "text": "Odoo workers", "value": ".*odoo.*|.*worker.*" },
+          { "selected": false, "text": "HTTP workers only", "value": ".*odoo.*http.*|.*odoo-web.*" },
+          { "selected": false, "text": "Cron workers only", "value": ".*cron.*|.*odoo.*cron.*" },
+          { "selected": false, "text": "Longpolling only", "value": ".*longpolling.*|.*gevent.*" }
+        ],
+        "query": ".*odoo.*|.*worker.*",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Odoo Workers — HTTP Traffic, CPU & I/O",
+  "uid": "odoo-workers-v1",
+  "version": 1
+}

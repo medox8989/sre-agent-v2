@@ -1,0 +1,263 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# process-exporter — Sub-pod Odoo Worker Process Monitoring
+#
+# What this gives you:
+#   - How many HTTPWorker / CronWorker / GeventWorker processes are running
+#     per node (not per pod — actual OS-level worker processes inside Odoo)
+#   - CPU consumption per worker TYPE (not aggregate pod CPU)
+#   - Memory (RSS) per worker type — detect memory leaks in specific workers
+#   - Open file descriptors per HTTP worker — active connection load proxy
+#   - Worker process AGE — detect workers that crashed and restarted
+#
+# How Odoo workers work:
+#   When Odoo starts with --workers N it forks:
+#     1 master process       → proctitle: "odoo: master"
+#     N HTTP workers         → proctitle: "odoo: HTTPWorker"
+#     1 cron worker          → proctitle: "odoo: CronWorker"
+#     1 gevent/longpolling   → proctitle: "odoo: GeventWorker"
+#
+#   process-exporter reads /proc on the node and groups processes by their
+#   proctitle, giving you counts and resource usage per worker type.
+#
+# Architecture:
+#   DaemonSet in 'monitoring' namespace, one pod per node, hostPID: true
+#   Prometheus scrapes via ServiceMonitor (kube-prometheus-stack)
+#   Grafana dashboard: grafana/odoo-process-workers-dashboard.json
+#
+# Per-namespace breakdown (optional — better visibility):
+#   For per-namespace metrics add a sidecar to each Odoo deployment.
+#   See the sidecar section at the bottom of this file.
+#
+# Deploy:
+#   kubectl apply -f k8s/08-process-exporter.yaml
+#
+# Verify:
+#   kubectl port-forward -n monitoring daemonset/process-exporter 9256
+#   curl -s localhost:9256/metrics | grep namedprocess_namegroup_num_procs
+#
+# NOTE: This DaemonSet intentionally uses hostPID: true.
+#   The SRE agent will flag it as HostPIDPod (WARNING).
+#   Add the label: sre.io/skip-hostpid: "monitoring" to suppress if needed.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 1. ConfigMap — which processes to track ──────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: process-exporter-config
+  namespace: monitoring
+  labels:
+    app: process-exporter
+data:
+  config.yml: |
+    process_names:
+
+      # ── Odoo HTTP Workers (one process per --workers N) ──────────────────
+      # These handle web requests. Count should equal --workers value.
+      # If count drops below configured --workers, a worker crashed.
+      - name: "odoo_http_worker"
+        cmdline:
+          - 'odoo: HTTPWorker'
+
+      # ── Odoo Cron Worker (handles scheduled actions, email queue) ────────
+      - name: "odoo_cron_worker"
+        cmdline:
+          - 'odoo: CronWorker'
+
+      # ── Odoo Gevent/Longpolling Worker (real-time / bus / chat) ─────────
+      - name: "odoo_gevent_worker"
+        cmdline:
+          - 'odoo: GeventWorker'
+
+      # ── Odoo Master Process (supervises all workers) ─────────────────────
+      # Count = number of Odoo deployments running on this node
+      - name: "odoo_master"
+        cmdline:
+          - 'odoo: master'
+
+      # ── PostgreSQL backend processes ─────────────────────────────────────
+      # Each active DB connection is one postgres backend process
+      - name: "postgres_backend"
+        cmdline:
+          - 'postgres: .* odoo'
+
+      # ── PostgreSQL main process ──────────────────────────────────────────
+      - name: "postgres_main"
+        cmdline:
+          - 'postgres -'
+
+---
+# ── 2. ServiceAccount ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+
+---
+# ── 3. DaemonSet — one pod per node, reads /proc with hostPID ───────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: process-exporter
+      annotations:
+        # Intentional hostPID — monitoring exception
+        sre.io/skip-hostpid: "monitoring-daemonset"
+    spec:
+      serviceAccountName: process-exporter
+      # ── hostPID: required to read /proc of ALL processes on the node ──────
+      hostPID: true
+      tolerations:
+        # Run on ALL nodes including control-plane and tainted nodes
+        - operator: "Exists"
+          effect: "NoSchedule"
+        - operator: "Exists"
+          effect: "NoExecute"
+      containers:
+        - name: process-exporter
+          image: ncabatoff/process-exporter:0.8.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.path=/config/config.yml
+            - --procfs=/host/proc
+            - --web.listen-address=:9256
+            # Expose per-process metrics (not just group totals)
+            - --enable-mem-info-metrics
+          ports:
+            - name: metrics
+              containerPort: 9256
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+          resources:
+            requests:
+              cpu:    20m
+              memory: 64Mi
+            limits:
+              cpu:    100m
+              memory: 128Mi
+          securityContext:
+            # Needs read access to /proc of all users on the node
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9256 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /metrics, port: 9256 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: process-exporter-config
+        - name: proc
+          hostPath:
+            path: /proc
+
+---
+# ── 4. Service ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    app: process-exporter
+  ports:
+    - name: metrics
+      port: 9256
+      targetPort: 9256
+  clusterIP: None   # Headless — ServiceMonitor scrapes each pod individually
+
+---
+# ── 5. ServiceMonitor — tells Prometheus to scrape process-exporter ──────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+    release: prometheus-stack    # kube-prometheus-stack selector
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  endpoints:
+    - port: metrics
+      interval: 30s
+      scrapeTimeout: 20s
+      relabelings:
+        # Add the node name as a label so we can filter per node in Grafana
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDECAR APPROACH — Per-namespace worker visibility (optional, better)
+#
+# Add this to each Odoo Deployment spec.template to get per-namespace metrics:
+#
+# spec:
+#   template:
+#     spec:
+#       shareProcessNamespace: true   # ← lets the sidecar see Odoo processes
+#       containers:
+#         # ... your existing odoo container ...
+#         - name: process-exporter
+#           image: ncabatoff/process-exporter:0.8.3
+#           args:
+#             - --config.path=/config/config.yml
+#             - --web.listen-address=:9256
+#           ports:
+#             - containerPort: 9256
+#               name: proc-metrics
+#           volumeMounts:
+#             - name: proc-exporter-config
+#               mountPath: /config
+#               readOnly: true
+#           resources:
+#             requests: { cpu: 10m, memory: 32Mi }
+#             limits:   { cpu: 50m,  memory: 64Mi }
+#       volumes:
+#         - name: proc-exporter-config
+#           configMap:
+#             name: process-exporter-config  # same ConfigMap above
+#
+# Then add pod annotation for Prometheus scraping:
+#   annotations:
+#     prometheus.io/scrape: "true"
+#     prometheus.io/port:   "9256"
+#
+# With this approach metrics will have namespace + pod labels → full
+# per-namespace worker breakdown in the dashboard.
+# ══════════════════════════════════════════════════════════════════════════════
