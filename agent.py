@@ -380,6 +380,29 @@ if PROMETHEUS_ENABLED:
     _c_crashloops  = Counter('sre_crashloops_detected_total',  'New CrashLoopBackOff pods detected')
     _c_checks_run  = Counter('sre_check_cycles_total',         'Total check cycles completed')
 
+    # ── Static recommendation info metric (populated once at startup) ────────
+    # Labels carry the recommendation text for each check type.
+    # Join this with sre_issues_by_check in Grafana to show recommendations
+    # alongside active issues — just like the CLI output.
+    #
+    # PromQL to use in Grafana:
+    #   (sre_issues_by_check > 0) * on(check) group_left(root_cause,immediate,prevent) sre_check_rec_info
+    #
+    _g_rec_info = Gauge('sre_check_rec_info',
+                        'Static recommendation text per check type. '
+                        'Join with sre_issues_by_check on (check) to display in tables.',
+                        ['check', 'root_cause', 'immediate', 'prevent'])
+
+    def _setup_rec_metrics():
+        """Populate sre_check_rec_info once at process startup — static, never changes."""
+        for chk, rec in _REC.items():
+            _g_rec_info.labels(
+                check=chk,
+                root_cause=rec['root_cause'][:220],
+                immediate=rec['immediate'][:220],
+                prevent=rec['prevent'][:220],
+            ).set(1)
+
     # ── State for deduplicating counter increments ───────────────────────────
     _prev_issue_keys: Set[Tuple[str, str]] = set()
     _seen_check_labels: Set[Tuple[str, str]] = set()
@@ -430,9 +453,14 @@ if PROMETHEUS_ENABLED:
 
         _prev_issue_keys = current_keys
 
+    def _noop_setup():
+        pass
+
 else:
     def update_metrics(report: Dict[str, Any], duration: float) -> None:
         pass  # no-op if prometheus_client not installed
+    def _setup_rec_metrics():
+        pass
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -1236,6 +1264,7 @@ def run_loop():
 
 
 if __name__ == "__main__":
+    _setup_rec_metrics()   # populate sre_check_rec_info once at startup
     start_metrics_server()
     if "--once" in sys.argv:
         run_once()
