@@ -1,0 +1,28 @@
+# ── PodMonitor — apply ONCE to the monitoring namespace ─────────────────────
+# kubectl apply -f k8s/09b-odoo-podmonitor.yaml -n monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: odoo-process-exporter
+  namespace: monitoring
+  labels:
+    release: prometheus-stack
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      sre.io/process-exporter: "true"
+  podMetricsEndpoints:
+    - port: proc-metrics
+      interval: 30s
+      scrapeTimeout: 20s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_namespace]
+          targetLabel: odoo_namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: odoo_pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: odoo_app
