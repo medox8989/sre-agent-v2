@@ -2,22 +2,23 @@
 # process-exporter — Sub-pod Odoo Worker Process Monitoring
 #
 # What this gives you:
-#   - How many HTTPWorker / CronWorker / GeventWorker processes are running
-#     per node (not per pod — actual OS-level worker processes inside Odoo)
-#   - CPU consumption per worker TYPE (not aggregate pod CPU)
-#   - Memory (RSS) per worker type — detect memory leaks in specific workers
-#   - Open file descriptors per HTTP worker — active connection load proxy
-#   - Worker process AGE — detect workers that crashed and restarted
+#   - How many Odoo worker processes are running per node
+#   - CPU and memory (RSS) consumption per worker group
+#   - Open file descriptors — active connection proxy
+#   - Worker process age — detect workers that crashed and restarted
 #
-# How Odoo workers work:
-#   When Odoo starts with --workers N it forks:
-#     1 master process       → proctitle: "odoo: master"
-#     N HTTP workers         → proctitle: "odoo: HTTPWorker"
-#     1 cron worker          → proctitle: "odoo: CronWorker"
-#     1 gevent/longpolling   → proctitle: "odoo: GeventWorker"
+# How Odoo workers appear in /proc:
+#   Odoo does NOT use setproctitle. Every process (master, HTTP workers, cron)
+#   shows the same cmdline: /usr/bin/python3 /usr/bin/odoo -c <config>
+#   Only the gevent/longpolling worker is distinguishable — it has "gevent"
+#   as an argument: /usr/bin/python3 /usr/bin/odoo gevent -c <config>
 #
-#   process-exporter reads /proc on the node and groups processes by their
-#   proctitle, giving you counts and resource usage per worker type.
+#   Groups defined here:
+#     odoo_gevent   → 1 process  (longpolling/bus)
+#     odoo_workers  → N+2 processes  (1 master + N HTTP workers + 1 cron)
+#     HTTP worker count ≈ odoo_workers - 2
+#
+#   process-exporter reads /proc on the node and groups processes by cmdline.
 #
 # Architecture:
 #   DaemonSet in 'monitoring' namespace, one pod per node, hostPID: true
@@ -52,39 +53,35 @@ data:
   config.yml: |
     process_names:
 
-      # ── Odoo HTTP Workers (one process per --workers N) ──────────────────
-      # These handle web requests. Count should equal --workers value.
-      # If count drops below configured --workers, a worker crashed.
-      - name: "odoo_http_worker"
+      # ── Odoo Gevent / Longpolling Worker ─────────────────────────────────
+      # MUST be first — "odoo gevent" is the only distinguishable worker.
+      # cmdline: /usr/bin/python3 /usr/bin/odoo gevent -c /etc/odoo/odoo.conf
+      # Count = always 1 per Odoo instance (longpolling / bus / live chat)
+      - name: "odoo_gevent"
         cmdline:
-          - 'odoo: HTTPWorker'
+          - '/usr/bin/odoo gevent'
 
-      # ── Odoo Cron Worker (handles scheduled actions, email queue) ────────
-      - name: "odoo_cron_worker"
+      # ── All other Odoo processes (master + HTTP workers + cron worker) ───
+      # Odoo does NOT use setproctitle — every worker has an identical cmdline:
+      #   /usr/bin/python3 /usr/bin/odoo -c /etc/odoo/odoo.conf ...
+      # There is no way to tell master, HTTP workers, and cron apart via /proc.
+      #
+      # Group size = 1 master + workers_count HTTP + 1 cron = workers_count + 2
+      # With workers = 7  →  expect 9 processes in this group.
+      # HTTP worker count ≈  num_procs - 2
+      - name: "odoo_workers"
         cmdline:
-          - 'odoo: CronWorker'
+          - '/usr/bin/odoo'
 
-      # ── Odoo Gevent/Longpolling Worker (real-time / bus / chat) ─────────
-      - name: "odoo_gevent_worker"
-        cmdline:
-          - 'odoo: GeventWorker'
-
-      # ── Odoo Master Process (supervises all workers) ─────────────────────
-      # Count = number of Odoo deployments running on this node
-      - name: "odoo_master"
-        cmdline:
-          - 'odoo: master'
-
-      # ── PostgreSQL backend processes ─────────────────────────────────────
-      # Each active DB connection is one postgres backend process
+      # ── PostgreSQL backend processes (one per active DB connection) ───────
       - name: "postgres_backend"
         cmdline:
-          - 'postgres: .* odoo'
+          - 'postgres: '
 
-      # ── PostgreSQL main process ──────────────────────────────────────────
+      # ── PostgreSQL postmaster / main process ──────────────────────────────
       - name: "postgres_main"
         cmdline:
-          - 'postgres -'
+          - 'postgres -D'
 
 ---
 # ── 2. ServiceAccount ────────────────────────────────────────────────────────
@@ -136,8 +133,6 @@ spec:
             - --config.path=/config/config.yml
             - --procfs=/host/proc
             - --web.listen-address=:9256
-            # Expose per-process metrics (not just group totals)
-            - --enable-mem-info-metrics
           ports:
             - name: metrics
               containerPort: 9256
