@@ -28,6 +28,7 @@ Checks:
 """
 
 import gc
+import re
 import sys
 import os
 import time
@@ -349,6 +350,139 @@ _REC: Dict[str, Dict[str, str]] = {
                       "Use proper readinessProbe that accurately reflects app readiness. "
                       "Test the startup sequence on staging before production.",
     },
+    # ── Security checks (Kubernetes Goat scenarios) ──────────────────────────
+    "PrivilegedContainer": {
+        "root_cause": "Container runs with securityContext.privileged:true — it gets all Linux capabilities "
+                      "and can see and modify host devices, network stack, and kernel modules. "
+                      "Any RCE inside this container is a full host escape. (Kubernetes Goat sc-4)",
+        "immediate":  "kubectl get pod <pod> -n <ns> -o jsonpath='{.spec.containers[*].securityContext}'. "
+                      "Remove privileged:true. Almost no application needs it — only special node agents do.",
+        "prevent":    "Use Pod Security Admission (restricted profile). "
+                      "Enforce via Kyverno/OPA: deny containers with privileged:true at admission time.",
+    },
+    "DockerSocketMount": {
+        "root_cause": "Container mounts /var/run/docker.sock as a hostPath volume. "
+                      "This gives full Docker daemon access — anyone inside the container can create a "
+                      "privileged container that mounts the host filesystem. Full host escape. (Goat sc-2)",
+        "immediate":  "Remove the hostPath volume for /var/run/docker.sock immediately. "
+                      "Use a dedicated build tool (Kaniko, Buildah) inside the cluster instead.",
+        "prevent":    "Never mount the Docker socket in production pods. "
+                      "Use remote build services or in-cluster Kaniko for CI/CD image builds.",
+    },
+    "DangerousHostPath": {
+        "root_cause": "Container mounts a sensitive host filesystem path (/etc, /proc, /sys, /root, /boot) "
+                      "via hostPath volume. This enables reading host credentials, modifying sysctl, "
+                      "or writing to init scripts — effectively a host root access vector. (Goat sc-4)",
+        "immediate":  "kubectl describe pod <pod> -n <ns> to see volume mounts. "
+                      "Remove the hostPath volume and replace with an emptyDir or ConfigMap if possible.",
+        "prevent":    "Use Pod Security Admission to deny hostPath volumes. "
+                      "Audit all existing hostPath mounts: kubectl get pods -A -o json | "
+                      "jq '.items[].spec.volumes[]? | select(.hostPath)'",
+    },
+    "HostNetworkPod": {
+        "root_cause": "Pod has hostNetwork:true — it shares the node's network namespace, can bind to "
+                      "any port on the node's real IP, and can sniff all pod-to-pod traffic on the node. "
+                      "Bypasses NetworkPolicy for inter-pod communication. (Goat sc-11)",
+        "immediate":  "Verify this is intentional (e.g., node-level monitoring agents like Falco). "
+                      "For application pods: remove hostNetwork:true immediately.",
+        "prevent":    "Application pods should never need hostNetwork. "
+                      "Restrict to specific system namespaces via Pod Security Admission.",
+    },
+    "HostPIDPod": {
+        "root_cause": "Pod has hostPID:true — it can see all processes running on the host, including "
+                      "processes from other containers. An attacker can use /proc/<pid>/mem to read "
+                      "memory of any host process, extract secrets, or inject code. (Goat sc-4)",
+        "immediate":  "Remove hostPID:true unless this is a dedicated debugging or monitoring tool.",
+        "prevent":    "Enforce via Pod Security Admission (hostPID is forbidden in restricted profile). "
+                      "Use ephemeral containers with kubectl debug for ad-hoc process inspection.",
+    },
+    "HostIPCPod": {
+        "root_cause": "Pod has hostIPC:true — it shares the host's IPC namespace. "
+                      "An attacker inside the pod can attach to shared memory segments of other processes "
+                      "on the host, potentially extracting data from databases or application caches.",
+        "immediate":  "Remove hostIPC:true. Very few legitimate workloads require this.",
+        "prevent":    "Enforce via Pod Security Admission. "
+                      "Audit: kubectl get pods -A -o json | jq '.items[] | select(.spec.hostIPC==true)'",
+    },
+    "RBACWildcardRole": {
+        "root_cause": "A Role or ClusterRole uses wildcard verbs (*) or wildcard resources (*), "
+                      "granting permissions that are far broader than needed. "
+                      "A compromised pod bound to this role can read secrets, exec into pods, "
+                      "or modify cluster state. (Kubernetes Goat sc-16)",
+        "immediate":  "kubectl describe clusterrole <name> to see the exact rules. "
+                      "Replace wildcards with the specific verbs/resources actually needed.",
+        "prevent":    "Follow least-privilege RBAC: grant only get/list on specific resources. "
+                      "Use 'kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa>' to audit.",
+    },
+    "RBACClusterAdminBinding": {
+        "root_cause": "A ServiceAccount in a non-system namespace is bound to the cluster-admin ClusterRole. "
+                      "This is the highest privilege in Kubernetes — it bypasses all authorization checks. "
+                      "A compromised pod with this SA can delete namespaces, read all secrets, "
+                      "and modify RBAC itself. (Kubernetes Goat sc-16)",
+        "immediate":  "kubectl describe clusterrolebinding <name> to see what binds to cluster-admin. "
+                      "Replace with a scoped ClusterRole granting only what is actually needed.",
+        "prevent":    "Never bind cluster-admin to application service accounts. "
+                      "Regularly audit: kubectl get clusterrolebindings -o json | "
+                      "jq '.items[] | select(.roleRef.name==\"cluster-admin\")'",
+    },
+    "HardcodedSecret": {
+        "root_cause": "A container has an environment variable whose name indicates a secret "
+                      "(PASSWORD, TOKEN, API_KEY, SECRET, etc.) but whose value is a plain literal "
+                      "string — not a secretKeyRef. The value is visible in 'kubectl describe pod', "
+                      "kubectl get pod -o yaml, and any audit log. (Kubernetes Goat sc-1)",
+        "immediate":  "kubectl create secret generic <name> --from-literal=<KEY>=<value> -n <ns>. "
+                      "Update the deployment to use secretKeyRef instead of the literal value. "
+                      "Consider the secret compromised and rotate it.",
+        "prevent":    "Use Kubernetes Secrets + secretKeyRef for all credentials. "
+                      "Use External Secrets Operator or OCI Vault to sync secrets into the cluster. "
+                      "Scan deployments with: kubectl get deploy -A -o json | jq to detect plaintext creds.",
+    },
+    "NoNetworkPolicy": {
+        "root_cause": "The namespace has running pods but no NetworkPolicy defined. "
+                      "In a flat network (default Kubernetes), every pod can reach every other pod "
+                      "across all namespaces — a compromised Odoo pod can directly connect to your "
+                      "PostgreSQL DB, Redis, or internal services in other namespaces. (Goat sc-20)",
+        "immediate":  "Apply a default-deny-all ingress policy first, then whitelist only required paths. "
+                      "kubectl apply -f default-deny-ingress.yaml -n <ns>",
+        "prevent":    "Every production namespace should have at minimum a default-deny ingress policy. "
+                      "Use Calico or Cilium for namespace-level network segmentation.",
+    },
+    "NodePortExposed": {
+        "root_cause": "Service type NodePort opens a port directly on every node's public IP address. "
+                      "Any host that can reach the node (including the internet if nodes have public IPs) "
+                      "can connect to the service — bypassing your Ingress and WAF. (Kubernetes Goat sc-8)",
+        "immediate":  "Switch to type: ClusterIP and expose via an Ingress controller. "
+                      "If NodePort is needed temporarily, restrict via OCI Security List / NSG rules.",
+        "prevent":    "Use ClusterIP + Ingress as the standard pattern. "
+                      "Reserve NodePort/LoadBalancer for specific infrastructure services only.",
+    },
+    "ContainerRunsAsRoot": {
+        "root_cause": "Container has no runAsNonRoot:true or runAsUser set in securityContext. "
+                      "It likely runs as UID 0 (root) inside the container. "
+                      "Combined with any container escape, the attacker has root on the host node.",
+        "immediate":  "Add securityContext: runAsNonRoot: true and runAsUser: 1000 (or app-specific UID). "
+                      "Test the app starts correctly with a non-root UID.",
+        "prevent":    "Build images with a non-root USER in the Dockerfile. "
+                      "Enforce runAsNonRoot:true via Pod Security Admission or Kyverno policy.",
+    },
+    "AutomountSAToken": {
+        "root_cause": "Pod uses the default ServiceAccount with automountServiceAccountToken:true (the K8s default). "
+                      "A token granting Kubernetes API access is mounted at /var/run/secrets/kubernetes.io/serviceaccount. "
+                      "If the app is compromised, the attacker can query the K8s API with this token. (Goat sc-11)",
+        "immediate":  "If the pod doesn't need K8s API access, add automountServiceAccountToken: false "
+                      "to the pod spec or ServiceAccount.",
+        "prevent":    "Set automountServiceAccountToken: false on the default ServiceAccount in every namespace. "
+                      "Create dedicated SAs with minimal permissions only for pods that actually need API access.",
+    },
+    "DangerousCapability": {
+        "root_cause": "Container adds a Linux capability (SYS_ADMIN, NET_ADMIN, SYS_PTRACE, NET_RAW, etc.) "
+                      "that significantly expands what root processes inside the container can do. "
+                      "SYS_ADMIN alone is nearly equivalent to full privilege.",
+        "immediate":  "kubectl describe pod <pod> -n <ns> | grep -A5 Capabilities. "
+                      "Remove the capability from securityContext.capabilities.add if not strictly needed.",
+        "prevent":    "Default: drop ALL capabilities and add back only what is required. "
+                      "securityContext.capabilities.drop: [ALL], then add: only the specific caps needed.",
+    },
 }
 
 
@@ -539,6 +673,8 @@ def _clients() -> Tuple:
         client.CoreV1Api(),
         client.AppsV1Api(),
         client.BatchV1Api(),
+        client.RbacAuthorizationV1Api(),
+        client.NetworkingV1Api(),
     )
 
 def _now() -> datetime:
@@ -967,6 +1103,290 @@ def check_overcommit(node_items: list, pod_items: list) -> List[Dict]:
     return issues
 
 
+# ── Security checks ──────────────────────────────────────────────────────────
+
+# Env-var names that hint at a secret being hardcoded in plain text
+_SECRET_ENV_PAT = re.compile(
+    r'(password|passwd|secret|token|api.?key|auth|credential|private.?key|'
+    r'access.?key|client.?secret|db.?pass|database.?pass|encryption.?key)',
+    re.IGNORECASE
+)
+
+# Linux capabilities that significantly expand container privileges
+_DANGEROUS_CAPS = frozenset({
+    "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYS_MODULE",
+    "SYS_RAWIO", "SYS_BOOT", "NET_RAW", "DAC_OVERRIDE",
+    "DAC_READ_SEARCH", "SETUID", "SETGID",
+})
+
+# hostPath prefixes that expose sensitive host filesystem areas
+_SENSITIVE_HOST_PATHS = ("/var/run/docker.sock",
+                         "/etc", "/proc", "/sys", "/root", "/boot",
+                         "/var/lib/docker", "/run/containerd")
+
+
+def check_pod_security(pod_items: list) -> List[Dict]:
+    """Security posture checks based on Kubernetes Goat scenarios (sc-1,2,4,11,16,20).
+
+    Checks per pod/container:
+      - PrivilegedContainer    (CRITICAL) — securityContext.privileged:true
+      - DockerSocketMount      (CRITICAL) — /var/run/docker.sock hostPath
+      - DangerousHostPath      (CRITICAL) — /etc, /proc, /sys etc. hostPath
+      - HostNetworkPod         (WARNING)  — hostNetwork:true
+      - HostPIDPod             (WARNING)  — hostPID:true
+      - HostIPCPod             (WARNING)  — hostIPC:true
+      - DangerousCapability    (WARNING)  — SYS_ADMIN, NET_ADMIN, etc.
+      - HardcodedSecret        (CRITICAL) — plain-text secret in env var
+      - ContainerRunsAsRoot    (INFO)     — no runAsNonRoot / runAsUser
+      - AutomountSAToken       (INFO)     — default SA with token automounted
+    """
+    issues = []
+
+    for pod in pod_items:
+        ns   = pod.metadata.namespace
+        name = pod.metadata.name
+        spec = pod.spec
+
+        if ns in SKIP_NS:
+            continue
+        if pod.status.phase not in ("Running", "Pending", "Unknown"):
+            continue
+
+        res = f"{ns}/{name}"
+
+        # ── Pod-level host namespace flags ───────────────────────────────────
+        if getattr(spec, 'host_network', False):
+            issues.append(_issue("WARNING", "HostNetworkPod", res,
+                "Pod uses hostNetwork:true — bypasses pod network isolation, sees all node interfaces",
+                action=f"Remove hostNetwork:true from pod spec in {ns}"))
+
+        if getattr(spec, 'host_pid', False):
+            issues.append(_issue("WARNING", "HostPIDPod", res,
+                "Pod uses hostPID:true — can inspect and signal all host processes",
+                action=f"Remove hostPID:true from pod spec in {ns}"))
+
+        if getattr(spec, 'host_ipc', False):
+            issues.append(_issue("WARNING", "HostIPCPod", res,
+                "Pod uses hostIPC:true — shares host IPC namespace (shared-memory attack surface)",
+                action=f"Remove hostIPC:true from pod spec in {ns}"))
+
+        # ── automount default SA token ────────────────────────────────────────
+        sa   = (getattr(spec, 'service_account_name', None) or 'default')
+        auto = getattr(spec, 'automount_service_account_token', True)
+        if sa == 'default' and auto is not False:
+            issues.append(_issue("INFO", "AutomountSAToken", res,
+                "Pod uses default ServiceAccount with automounted token — unnecessary K8s API access if compromised",
+                action=f"Add automountServiceAccountToken: false to the pod spec in {ns}"))
+
+        # ── hostPath volumes ─────────────────────────────────────────────────
+        for vol in (spec.volumes or []):
+            if not vol.host_path:
+                continue
+            hp = (vol.host_path.path or "").rstrip("/")
+            if hp == "/var/run/docker.sock":
+                issues.append(_issue("CRITICAL", "DockerSocketMount", res,
+                    f"Volume '{vol.name}' mounts /var/run/docker.sock — full container-to-host escape",
+                    action=f"Remove docker socket volume from {ns}/{name} immediately"))
+            elif any(hp == p or hp.startswith(p + "/") for p in _SENSITIVE_HOST_PATHS if p != "/var/run/docker.sock"):
+                issues.append(_issue("CRITICAL", "DangerousHostPath", res,
+                    f"Volume '{vol.name}' mounts sensitive host path '{hp}'",
+                    action=f"Replace hostPath with emptyDir or ConfigMap in {ns}/{name}"))
+
+        # ── Per-container checks ─────────────────────────────────────────────
+        all_containers = list(spec.containers or []) + list(spec.init_containers or [])
+        for c in all_containers:
+            cn = c.name
+            sc = c.security_context
+
+            # Privileged
+            if sc and getattr(sc, 'privileged', False):
+                issues.append(_issue("CRITICAL", "PrivilegedContainer", res,
+                    f"Container '{cn}' runs privileged — full host escape possible",
+                    action=f"kubectl set env deployment/<name> -n {ns} — remove privileged:true"))
+
+            # Running as root (no runAsNonRoot, no runAsUser != 0)
+            runs_as_root = True
+            if sc:
+                if getattr(sc, 'run_as_non_root', None):
+                    runs_as_root = False
+                uid = getattr(sc, 'run_as_user', None)
+                if uid is not None and uid != 0:
+                    runs_as_root = False
+            # Only flag if capabilities are also not dropped
+            if runs_as_root:
+                drops_all = False
+                if sc and sc.capabilities:
+                    drops_all = any(
+                        (d or "").upper() == "ALL" for d in (sc.capabilities.drop or [])
+                    )
+                if not drops_all:
+                    issues.append(_issue("INFO", "ContainerRunsAsRoot", res,
+                        f"Container '{cn}' has no runAsNonRoot/runAsUser — likely running as UID 0",
+                        action=f"Add securityContext.runAsNonRoot: true, runAsUser: 1000 to '{cn}'"))
+
+            # Dangerous Linux capabilities
+            if sc and sc.capabilities:
+                for cap in (sc.capabilities.add or []):
+                    if (cap or "").upper() in _DANGEROUS_CAPS:
+                        issues.append(_issue("WARNING", "DangerousCapability", res,
+                            f"Container '{cn}' adds capability {cap.upper()} — elevated kernel access",
+                            action=f"Remove cap {cap} from {cn} or use 'drop: [ALL], add: [<min-needed>]'"))
+
+            # Hardcoded secrets in env vars
+            for env in (c.env or []):
+                if (env.value and not env.value_from
+                        and len(env.value) > 3
+                        and _SECRET_ENV_PAT.search(env.name or "")):
+                    issues.append(_issue("CRITICAL", "HardcodedSecret", res,
+                        f"Container '{cn}' env '{env.name}' has a plain-text value — use secretKeyRef",
+                        action=(f"kubectl create secret generic <name> --from-literal={env.name}=<value> "
+                                f"-n {ns} && update deployment to use secretKeyRef")))
+
+    return issues
+
+
+def check_rbac(rbac_api) -> List[Dict]:
+    """Detect overly permissive RBAC roles/bindings (Kubernetes Goat sc-16).
+
+    Checks:
+      - RBACWildcardRole         (CRITICAL) — ClusterRole/Role with wildcard verbs or resources
+      - RBACClusterAdminBinding  (CRITICAL) — ServiceAccount outside system NS bound to cluster-admin
+    """
+    issues = []
+
+    # Built-in roles we don't want to flag
+    _BUILTIN = {"cluster-admin", "admin", "edit", "view",
+                "system:aggregate-to-admin", "system:aggregate-to-edit",
+                "system:aggregate-to-view"}
+
+    # ClusterRoles with wildcards
+    try:
+        for cr in rbac_api.list_cluster_role(limit=200).items:
+            name = cr.metadata.name
+            if name.startswith("system:") or name in _BUILTIN:
+                continue
+            for rule in (cr.rules or []):
+                verbs = rule.verbs or []
+                resources = rule.resources or []
+                if "*" in verbs or "*" in resources:
+                    which = "verbs+resources" if ("*" in verbs and "*" in resources) \
+                            else ("verbs" if "*" in verbs else "resources")
+                    issues.append(_issue("CRITICAL", "RBACWildcardRole", f"clusterrole/{name}",
+                        f"ClusterRole '{name}' has wildcard {which} — unrestricted cluster-wide access",
+                        action=f"kubectl describe clusterrole {name}  # replace wildcards with specific rules"))
+                    break  # one issue per role is enough
+    except ApiException:
+        pass
+
+    # Namespace Roles with wildcard verbs AND resources
+    try:
+        for role in rbac_api.list_role_for_all_namespaces(limit=300).items:
+            ns   = role.metadata.namespace
+            name = role.metadata.name
+            if ns in SKIP_NS:
+                continue
+            for rule in (role.rules or []):
+                verbs = rule.verbs or []
+                resources = rule.resources or []
+                if "*" in verbs and "*" in resources:
+                    issues.append(_issue("WARNING", "RBACWildcardRole", f"{ns}/role/{name}",
+                        f"Role '{name}' in ns '{ns}' grants wildcard verbs on wildcard resources",
+                        action=f"kubectl describe role {name} -n {ns}"))
+                    break
+    except ApiException:
+        pass
+
+    # ClusterRoleBindings to cluster-admin by app service accounts
+    _SYSTEM_NS = {"kube-system", "monitoring", "cert-manager", "ingress-nginx", "sre-agent"}
+    try:
+        for crb in rbac_api.list_cluster_role_binding(limit=200).items:
+            if crb.role_ref.name != "cluster-admin":
+                continue
+            for subj in (crb.subjects or []):
+                if subj.kind == "ServiceAccount":
+                    sns = subj.namespace or "unknown"
+                    if sns not in _SYSTEM_NS:
+                        issues.append(_issue("CRITICAL", "RBACClusterAdminBinding",
+                            f"clusterrolebinding/{crb.metadata.name}",
+                            f"ServiceAccount '{subj.name}' in ns '{sns}' is bound to cluster-admin",
+                            action=f"kubectl describe clusterrolebinding {crb.metadata.name}"))
+    except ApiException:
+        pass
+
+    return issues
+
+
+def check_network_policies(core, networking_api) -> List[Dict]:
+    """Flag namespaces with running pods but zero NetworkPolicy (Kubernetes Goat sc-20).
+
+    Checks:
+      - NoNetworkPolicy  (INFO) — namespace has pods but no network segmentation
+    """
+    issues = []
+    try:
+        ns_items = core.list_namespace(limit=100).items
+    except Exception:
+        return issues
+
+    try:
+        all_netpols = networking_api.list_network_policy_for_all_namespaces(limit=300).items
+        ns_with_policy = {np.metadata.namespace for np in all_netpols}
+    except Exception:
+        ns_with_policy = set()
+
+    # Build set of namespaces that have at least one Running pod
+    ns_with_pods: Set[str] = set()
+    try:
+        for pod in core.list_pod_for_all_namespaces(
+            limit=300, field_selector="status.phase=Running"
+        ).items:
+            ns_with_pods.add(pod.metadata.namespace)
+    except Exception:
+        return issues
+
+    for ns_obj in ns_items:
+        ns = ns_obj.metadata.name
+        if ns in SKIP_NS:
+            continue
+        if ns in ns_with_pods and ns not in ns_with_policy:
+            issues.append(_issue("INFO", "NoNetworkPolicy", f"namespace/{ns}",
+                f"Namespace '{ns}' has running pods but no NetworkPolicy — flat network, all pods reachable",
+                action=f"kubectl apply a default-deny-ingress NetworkPolicy in namespace {ns}"))
+
+    return issues
+
+
+def check_nodeport_services(core) -> List[Dict]:
+    """Flag services of type NodePort that may unintentionally expose ports on node IPs (Goat sc-8).
+
+    Checks:
+      - NodePortExposed  (WARNING) — NodePort service outside known infrastructure namespaces
+    """
+    issues = []
+    # Namespaces where NodePort/LoadBalancer is intentional (infra, monitoring)
+    _INFRA_NS = {"monitoring", "ingress-nginx", "kube-system", "cert-manager"}
+
+    try:
+        svcs = core.list_service_for_all_namespaces(limit=200).items
+    except Exception:
+        return issues
+
+    for svc in svcs:
+        ns   = svc.metadata.namespace
+        name = svc.metadata.name
+        if ns in SKIP_NS or ns in _INFRA_NS:
+            continue
+        stype = (svc.spec.type or "ClusterIP")
+        if stype == "NodePort":
+            ports = [str(p.node_port) for p in (svc.spec.ports or []) if p.node_port]
+            issues.append(_issue("WARNING", "NodePortExposed", f"{ns}/{name}",
+                f"Service '{name}' type=NodePort (node ports: {', '.join(ports) or '?'}) — "
+                f"exposed on every node's IP, bypasses Ingress/WAF",
+                action=f"Switch to ClusterIP + Ingress. Temp mitigation: restrict via OCI NSG rules."))
+
+    return issues
+
+
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  ORCHESTRATOR                                                    ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -976,7 +1396,7 @@ _SEV_ORDER = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
 def run_all_checks() -> Tuple[Dict[str, Any], float]:
     """Returns (report_dict, duration_seconds)."""
     t0 = time.time()
-    core, apps, batch = _clients()
+    core, apps, batch, rbac, networking = _clients()
     all_issues: List[Dict] = []
 
     try:
@@ -998,17 +1418,22 @@ def run_all_checks() -> Tuple[Dict[str, Any], float]:
         all_issues.append(_issue("WARNING", "AgentError", "sre-agent", f"node_overview failed: {e}"))
 
     checks = [
-        ("Nodes",        check_nodes,        (node_items,)),
-        ("Pods",         check_pods,         (pod_items,)),
-        ("Events",       check_events,       (core,)),
-        ("PVCs",         check_pvcs,         (core,)),
-        ("DaemonSets",   check_daemonsets,   (apps,)),
-        ("StatefulSets", check_statefulsets, (apps,)),
-        ("Jobs",         check_jobs,         (batch,)),
-        ("Services",     check_services,     (core,)),
-        ("ReplicaSets",  check_replicasets,  (apps,)),
-        ("Deployments",  check_deployments,  (apps,)),
-        ("Overcommit",   check_overcommit,   (node_items, pod_items)),
+        ("Nodes",           check_nodes,             (node_items,)),
+        ("Pods",            check_pods,              (pod_items,)),
+        ("Events",          check_events,            (core,)),
+        ("PVCs",            check_pvcs,              (core,)),
+        ("DaemonSets",      check_daemonsets,        (apps,)),
+        ("StatefulSets",    check_statefulsets,      (apps,)),
+        ("Jobs",            check_jobs,              (batch,)),
+        ("Services",        check_services,          (core,)),
+        ("ReplicaSets",     check_replicasets,       (apps,)),
+        ("Deployments",     check_deployments,       (apps,)),
+        ("Overcommit",      check_overcommit,        (node_items, pod_items)),
+        # ── Security checks (Kubernetes Goat) ───────────────────────────────
+        ("PodSecurity",     check_pod_security,      (pod_items,)),
+        ("RBAC",            check_rbac,              (rbac,)),
+        ("NetworkPolicies", check_network_policies,  (core, networking)),
+        ("NodePortServices",check_nodeport_services, (core,)),
     ]
 
     for label, fn, args in checks:

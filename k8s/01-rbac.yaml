@@ -51,6 +51,19 @@ rules:
       - nodes
       - pods
     verbs: ["get", "list"]
+  # RBAC inspection (for RBACWildcardRole + RBACClusterAdminBinding checks)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - clusterroles
+      - rolebindings
+      - clusterrolebindings
+    verbs: ["get", "list"]
+  # Network policies (for NoNetworkPolicy check)
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
+    verbs: ["get", "list"]
 ---
 # ClusterRoleBinding — bind the role to the agent ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1
