@@ -10,504 +10,1605 @@
     }
   ],
   "__requires": [
-    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
-    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
-    { "type": "panel",      "id": "stat",       "name": "Stat",       "version": "" },
-    { "type": "panel",      "id": "timeseries", "name": "Time series","version": "" },
-    { "type": "panel",      "id": "table",      "name": "Table",      "version": "" },
-    { "type": "panel",      "id": "gauge",      "name": "Gauge",      "version": "" },
-    { "type": "panel",      "id": "barchart",   "name": "Bar chart",  "version": "" },
-    { "type": "panel",      "id": "text",       "name": "Text",       "version": "" }
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "9.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "barchart",
+      "name": "Bar chart",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    }
   ],
-  "annotations": { "list": [] },
-  "description": "SRE Agent — Kubernetes Cluster Health. Current issues with root-cause + fix recommendations, historical pod lifecycle, per-pod cost, and node pressure.",
+  "annotations": {
+    "list": []
+  },
+  "description": "SRE Agent \u2014 Kubernetes Cluster Health. Current issues with root-cause + fix recommendations, historical pod lifecycle, per-pod cost, and node pressure.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "id": null,
   "links": [],
   "panels": [
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 100,
-      "title": "🛡 Cluster Health — Current State",
+      "title": "\ud83d\udee1 Cluster Health \u2014 Current State",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "mappings": [
             {
               "options": {
-                "0": { "color": "green", "index": 0, "text": "✅ HEALTHY" },
-                "1": { "color": "red",   "index": 1, "text": "⚠ ISSUES"  }
+                "0": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "\u2705 HEALTHY"
+                },
+                "1": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "\u26a0 ISSUES"
+                }
               },
               "type": "value"
             }
           ],
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 1
+      },
       "id": 1,
-      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
       "title": "Cluster Status",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "1 - sre_cluster_healthy{}", "legendFormat": "Status", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(1 - sre_cluster_healthy{})",
+          "legendFormat": "Status",
+          "refId": "A"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
       "id": 2,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "🔴 Critical Issues",
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\ud83d\udd34 Critical Issues",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_critical_issues_total{}", "legendFormat": "Critical", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_critical_issues_total{})",
+          "legendFormat": "Critical",
+          "refId": "A"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 1
+      },
       "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "🟡 Warning Issues",
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\ud83d\udfe1 Warning Issues",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_warning_issues_total{}", "legendFormat": "Warning", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_warning_issues_total{})",
+          "legendFormat": "Warning",
+          "refId": "A"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 1
+      },
       "id": 4,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "ℹ️ Info Notices",
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\u2139\ufe0f Info Notices",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_info_issues_total{}", "legendFormat": "Info", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_info_issues_total{})",
+          "legendFormat": "Info",
+          "refId": "A"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 1
+      },
       "id": 5,
-      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "🖥 Nodes Ready",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\ud83d\udda5 Nodes Ready",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_nodes_ready{}", "legendFormat": "Ready", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_nodes_total{}", "legendFormat": "Total", "refId": "B" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_nodes_ready{})",
+          "legendFormat": "Ready",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_nodes_total{})",
+          "legendFormat": "Total",
+          "refId": "B"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 120 }, { "color": "red", "value": 180 } ] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 180
+              }
+            ]
+          },
           "unit": "s"
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 1
+      },
       "id": 6,
-      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "⏱ Last Check Age",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\u23f1 Last Check Age",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "time() - sre_last_check_timestamp_seconds{}", "legendFormat": "Age", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - sum(sre_last_check_timestamp_seconds{})",
+          "legendFormat": "Age",
+          "refId": "A"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 10 }, { "color": "red", "value": 30 } ] },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
           "unit": "s"
         }
       },
-      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 1
+      },
       "id": 7,
-      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
-      "title": "⚡ Check Duration",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "textMode": "auto"
+      },
+      "title": "\u26a1 Check Duration",
       "type": "stat",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_check_duration_seconds{}", "legendFormat": "Duration", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(sre_check_duration_seconds{})",
+          "legendFormat": "Duration",
+          "refId": "A"
+        }
       ]
     },
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
       "id": 101,
-      "title": "🔥 Active Issues — with Root Cause & Fix Recommendations",
+      "title": "\ud83d\udd25 Active Issues \u2014 with Root Cause & Fix Recommendations",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Shows only check types that currently have active issues. Root Cause, Immediate action, and Prevent guidance is joined from the sre_check_rec_info metric (populated at agent startup).\n\nPromQL: (sre_issues_by_check > 0) * on(check) group_left(root_cause,immediate,prevent) sre_check_rec_info",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Active check types with severity and count. Filters out zero-count entries in Grafana (not in PromQL) to avoid race-condition blanks during scrape.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "custom": {
             "align": "left",
-            "cellOptions": { "type": "auto" },
+            "cellOptions": {
+              "type": "auto"
+            },
             "inspect": true,
             "minWidth": 60,
             "wrap": true
           },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "severity" },
+            "matcher": {
+              "id": "byName",
+              "options": "severity"
+            },
             "properties": [
-              { "id": "displayName", "value": "Severity" },
-              { "id": "custom.width", "value": 110 },
+              {
+                "id": "displayName",
+                "value": "Severity"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              },
               {
                 "id": "mappings",
                 "value": [
-                  { "options": { "CRITICAL": { "color": "red",    "index": 0, "text": "🔴 CRITICAL" }, "WARNING": { "color": "yellow", "index": 1, "text": "🟡 WARNING" }, "INFO": { "color": "blue", "index": 2, "text": "ℹ️  INFO" } }, "type": "value" }
+                  {
+                    "options": {
+                      "CRITICAL": {
+                        "color": "red",
+                        "index": 0,
+                        "text": "\ud83d\udd34 CRITICAL"
+                      },
+                      "WARNING": {
+                        "color": "yellow",
+                        "index": 1,
+                        "text": "\ud83d\udfe1 WARNING"
+                      },
+                      "INFO": {
+                        "color": "blue",
+                        "index": 2,
+                        "text": "\u2139\ufe0f  INFO"
+                      }
+                    },
+                    "type": "value"
+                  }
                 ]
               },
-              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "check" },
+            "matcher": {
+              "id": "byName",
+              "options": "check"
+            },
             "properties": [
-              { "id": "displayName", "value": "Check" },
-              { "id": "custom.width", "value": 200 }
+              {
+                "id": "displayName",
+                "value": "Check"
+              },
+              {
+                "id": "custom.width",
+                "value": 200
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Value" },
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
             "properties": [
-              { "id": "displayName", "value": "Count" },
-              { "id": "custom.width", "value": 60 },
-              { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } },
-              { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "yellow", "value": null }, { "color": "red", "value": 1 } ] } }
+              {
+                "id": "displayName",
+                "value": "Count"
+              },
+              {
+                "id": "custom.width",
+                "value": 60
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "yellow",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "root_cause" },
+            "matcher": {
+              "id": "byName",
+              "options": "root_cause"
+            },
             "properties": [
-              { "id": "displayName", "value": "🔍 Root Cause" },
-              { "id": "custom.minWidth", "value": 300 }
+              {
+                "id": "displayName",
+                "value": "\ud83d\udd0d Root Cause"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 300
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "immediate" },
+            "matcher": {
+              "id": "byName",
+              "options": "immediate"
+            },
             "properties": [
-              { "id": "displayName", "value": "⚡ Immediate Action" },
-              { "id": "custom.minWidth", "value": 280 }
+              {
+                "id": "displayName",
+                "value": "\u26a1 Immediate Action"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 280
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "prevent" },
+            "matcher": {
+              "id": "byName",
+              "options": "prevent"
+            },
             "properties": [
-              { "id": "displayName", "value": "🛡 Prevent" },
-              { "id": "custom.minWidth", "value": 260 }
+              {
+                "id": "displayName",
+                "value": "\ud83d\udee1 Prevent"
+              },
+              {
+                "id": "custom.minWidth",
+                "value": 260
+              }
             ]
           }
         ]
       },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
       "id": 10,
       "options": {
         "cellHeight": "lg",
-        "footer": { "countRows": false, "show": false },
+        "footer": {
+          "countRows": false,
+          "show": false
+        },
         "showHeader": true,
-        "sortBy": [{ "desc": true, "displayName": "Severity" }]
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Severity"
+          }
+        ]
       },
-      "title": "Active Issues — Root Cause & Recommended Actions",
+      "title": "Active Issues \u2014 Root Cause & Recommended Actions",
       "transformations": [
         {
           "id": "labelsToFields",
-          "options": { "mode": "columns" }
+          "options": {
+            "mode": "columns"
+          }
         },
         {
           "id": "filterFieldsByName",
           "options": {
             "include": {
-              "names": ["severity", "check", "root_cause", "immediate", "prevent", "Value"]
+              "names": [
+                "severity",
+                "check",
+                "Value"
+              ]
+            }
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "greater",
+                  "options": {
+                    "value": 0
+                  }
+                },
+                "fieldName": "Value"
+              }
+            ],
+            "match": "any",
+            "type": "include"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value": "Count"
             }
           }
         },
         {
           "id": "sortBy",
-          "options": { "fields": [{ "desc": true, "displayName": "severity" }] }
+          "options": {
+            "fields": [
+              {
+                "desc": true,
+                "displayName": "severity"
+              }
+            ]
+          }
         }
       ],
       "type": "table",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "(sre_issues_by_check > 0) * on(check) group_left(root_cause,immediate,prevent) sre_check_rec_info",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_issues_by_check{}",
           "instant": true,
+          "range": false,
+          "format": "table",
           "legendFormat": "__auto",
           "refId": "A"
         }
       ]
     },
-
+    {
+      "id": 109,
+      "type": "text",
+      "title": "\ud83d\udccb Recommendations Reference \u2014 all check types",
+      "description": "Static reference. Always available regardless of which image version is running.",
+      "gridPos": {
+        "h": 20,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "options": {
+        "content": "<div style=\"font-family:monospace;font-size:11px;padding:4px\">\n<h4 style=\"color:#e6c07b;margin:0 0 6px 0\">\ud83d\udccb Recommendations Reference \u2014 all 23 check types</h4>\n<p style=\"color:#666;margin:0 0 8px 0;font-size:10px\">This panel is always available. The \"Active Issues\" table above shows only currently firing checks.</p>\n<table style=\"width:100%;border-collapse:collapse\">\n  <thead>\n    <tr style=\"background:#21252b;color:#abb2bf;font-size:11px\">\n      <th style=\"padding:6px 8px;text-align:left;width:175px\">Check Type</th>\n      <th style=\"padding:6px 8px;text-align:left\">\ud83d\udd0d Root Cause</th>\n      <th style=\"padding:6px 8px;text-align:left\">\u26a1 Immediate Action</th>\n      <th style=\"padding:6px 8px;text-align:left\">\ud83d\udee1 Prevent</th>\n    </tr>\n  </thead>\n  <tbody>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">NodeNotReady</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Node process (kubelet/CRI-O) crashed or lost connectivity to control plane. Can also be disk/memory exhaustion.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">systemctl status kubelet; journalctl -u kubelet -n 50; systemctl restart kubelet if needed.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Enable OKE node auto-repair. Deploy Node Problem Detector DaemonSet.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">NodeDiskPressure</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Free disk dropped below eviction threshold (~1 GiB). Caused by image layer accumulation (imagePullPolicy:Always + old 0/0/0 RSes) or containers with no ephemeral-storage limit.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">On node: crictl rmi --prune. Delete old 0/0/0 RSes. Delete evicted pods: kubectl delete pods -A --field-selector=status.phase=Failed</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set imagePullPolicy: IfNotPresent. Set revisionHistoryLimit: 2. Add resources.limits.ephemeral-storage to every container.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">NodeMemoryPressure</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Node memory is exhausted. Containers with no memory limits can expand unbounded.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl top pods --all-namespaces --sort-by=memory \u2014 identify and restart the biggest consumer.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set memory limits on all containers. Use VPA to auto-tune. Distribute workloads evenly.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">PodEvicted</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Pod forcibly terminated by kubelet due to DiskPressure (ephemeral-storage) or MemoryPressure. The pod.status.message contains the exact reason.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl delete pod &lt;pod&gt; -n &lt;ns&gt; to remove artifact. kubectl describe node &lt;node&gt; for pressure status. crictl rmi --prune if DiskPressure.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Add ephemeral-storage limits. Set imagePullPolicy: IfNotPresent. Set revisionHistoryLimit: 2.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">OOMKilled</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Container exceeded memory limit and was killed by Linux OOM killer.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl top pod &lt;pod&gt; -n &lt;ns&gt; to see usage. kubectl logs &lt;pod&gt; --previous to see crash. Increase memory limit temporarily.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Raise limit. Use VPA to auto-tune. JVM: set -Xmx below the container limit. Profile for memory leaks.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">CrashLoopBackOff</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Container starts, crashes, restarts in a loop. Bad config, missing env/secret, dependency not ready, or app crash.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl logs &lt;pod&gt; -n &lt;ns&gt; --previous. Exit 137=OOM, Exit 1=app error, Exit 143=probe killed it.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Add init containers to wait for dependencies. Use readinessProbe. Validate env vars at startup.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">ImagePullBackOff</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Cannot pull image: tag missing, Docker Hub rate limit (100 pulls/6h), expired imagePullSecret, or registry unreachable.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl describe pod &lt;pod&gt; for exact error. Verify imagePullSecret: kubectl get secret ocir-secret -n &lt;ns&gt;.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Push all images to private OCIR. Set imagePullPolicy: IfNotPresent. Use image digests, not mutable tags.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#d19a66;font-weight:bold;white-space:nowrap;vertical-align:top\">PodPendingTooLong</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Scheduler cannot place the pod: insufficient resources, nodeSelector/affinity mismatch, PVC not bound, or taint mismatch.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl describe pod &lt;pod&gt; \u2192 Events \u2192 FailedScheduling for reason. kubectl top nodes for resources.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set accurate resource requests. Use Cluster Autoscaler. Audit nodeSelector labels.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#d19a66;font-weight:bold;white-space:nowrap;vertical-align:top\">HighRestartCount</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Container restarting repeatedly: OOMKills, app crashes, or aggressive liveness probe.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl logs &lt;pod&gt; --previous. Exit 137=OOM (raise limit). Exit 1=app error. Exit 143=tune probe.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Fix root crash. Tune liveness probe (failureThreshold, initialDelaySeconds). Use VPA for memory.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">DeadPodNotCleaned</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Failed pod sitting for too long. Terminated pods still consume ephemeral-storage (log files) on the node.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl delete pod &lt;pod&gt; -n &lt;ns&gt;. Bulk: kubectl delete pods -A --field-selector=status.phase=Failed</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Use ttlSecondsAfterFinished on Jobs. Kubernetes 1.23+ auto-GCs via --terminated-pod-gc-threshold.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e06c75;font-weight:bold;white-space:nowrap;vertical-align:top\">PVCLost</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">PersistentVolume backing this PVC was deleted or is inaccessible. Pods using it will fail to start.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl describe pvc &lt;name&gt; -n &lt;ns&gt;. Check block volume in OCI console. Restore from backup.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Never delete PVs manually. Use StorageClass reclaimPolicy: Retain. Backup with Velero or OCI Block Volume snapshots.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">PVCPending</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">PVC waiting for PV: StorageClass not configured, volume quota exceeded, or provisioner not running.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl describe pvc &lt;name&gt; \u2192 Events for provisioner errors. kubectl get storageclass.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Pre-provision volumes for stateful workloads. Monitor storage quota. Use WaitForFirstConsumer binding mode.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">ServiceNoEndpoints</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Service selector doesn't match any running pod labels, or all pods fail readinessProbe.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl get pods -n &lt;ns&gt; -l &lt;selector&gt;. kubectl describe endpoints &lt;svc&gt; -n &lt;ns&gt;.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Use consistent label conventions. Test selectors before applying. Add readinessProbes.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">OldReplicaSets</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Old 0/0/0 ReplicaSets holding image layer references on disk, preventing container runtime GC.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl get rs -n &lt;ns&gt; | awk 'NR&gt;1&amp;&amp;$2==0&amp;&amp;$3==0{print $1}' | xargs kubectl delete rs -n &lt;ns&gt;. Then: crictl rmi --prune</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set revisionHistoryLimit: 2. Set imagePullPolicy: IfNotPresent.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">ImagePullPolicyAlways</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Forces registry check on every pod start even if image is cached. Causes extra network traffic, slow starts, and layer accumulation.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">Change to IfNotPresent in the deployment spec. Safe when using unique immutable tags per build.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Always use content-addressable tags (git SHA/semver). Never use :latest in production.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">NoEphemeralStorageLimit</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Container with no ephemeral-storage limit can fill the entire node disk, evicting ALL pods on that node.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">Add resources.limits.ephemeral-storage: 1Gi to the container spec.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Enforce via LimitRange. Configure app log rotation. Use log-shipping sidecar (Promtail/Fluentd).</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">MemLimitOvercommit</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Total memory limits > 120% of node allocatable. If all pods hit limits simultaneously, OOM killer will cascade.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl top pods --all-namespaces --sort-by=memory. Move workloads to other nodes via affinity rules.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set limits \u2264 2\u00d7 requests. Use VPA. Add more nodes or use larger shapes.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">CPULimitOvercommit</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Total CPU limits exceed node allocatable. Causes throttling and degraded response times.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl top pods --all-namespaces --sort-by=cpu to find top consumers.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set CPU limits = requests for predictable performance. Spread workloads across more nodes.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">JobFailed</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Job has failed attempts. May still be retrying up to backoffLimit.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl logs -l job-name=&lt;name&gt; -n &lt;ns&gt; --tail=100. kubectl describe job &lt;name&gt; for backoff status.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Add error handling + retry logic in job code. Set backoffLimit and activeDeadlineSeconds.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">DaemonSetNotReady</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Node missing a ready DaemonSet pod: taint without toleration, insufficient resources, or pod crash.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl rollout status ds/&lt;name&gt; -n &lt;ns&gt;. kubectl get pods -n &lt;ns&gt; -l &lt;selector&gt; -o wide.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Ensure tolerations cover all node taints. Set appropriate resource requests.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">StatefulSetNotReady</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">StatefulSet pods not ready. Upgrades are sequential \u2014 one failing pod blocks the entire rollout.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl get pods -n &lt;ns&gt; -l &lt;selector&gt;. kubectl describe pod to see Events.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Ensure storage is provisioned. Use proper readinessProbe. Test startup sequence on staging.</td>\n    </tr>\n    <tr style=\"background:#16213e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#e5c07b;font-weight:bold;white-space:nowrap;vertical-align:top\">NoPodRequests</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">Pods without resource requests are BestEffort QoS \u2014 evicted FIRST under pressure.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">Add resource requests (even cpu: 10m, memory: 64Mi) to make pod Burstable.</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Enforce via LimitRange with defaults. Use VPA in recommendation mode.</td>\n    </tr>\n    <tr style=\"background:#1a1a2e;border-bottom:1px solid #2d2d2d\">\n      <td style=\"padding:5px 8px;color:#61afef;font-weight:bold;white-space:nowrap;vertical-align:top\">HighRevisionHistory</td>\n      <td style=\"padding:5px 8px;color:#abb2bf;vertical-align:top\">High revisionHistoryLimit keeps many old RSes around, each pinning image layers on node disk.</td>\n      <td style=\"padding:5px 8px;color:#98c379;vertical-align:top\">kubectl patch deploy &lt;name&gt; -n &lt;ns&gt; --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/revisionHistoryLimit\",\"value\":2}]'</td>\n      <td style=\"padding:5px 8px;color:#61afef;vertical-align:top\">Set revisionHistoryLimit: 2 in all deployment templates. Enforce via OPA/Kyverno policy.</td>\n    </tr>\n  </tbody>\n</table>\n</div>",
+        "mode": "html"
+      }
+    },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
       "id": 102,
-      "title": "📈 Issue Trends Over Time",
+      "title": "\ud83d\udcc8 Issue Trends Over Time",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 10, "gradientMode": "opacity", "lineWidth": 2, "showPoints": "auto", "spanNulls": false }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Critical" }, "properties": [ { "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Warning" },  "properties": [ { "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Info" },     "properties": [ { "id": "color", "value": { "fixedColor": "blue",   "mode": "fixed" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Critical"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Warning"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Info"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
       "id": 20,
       "options": {
-        "legend": { "calcs": ["lastNotNull","max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Critical & Warning Issues — Trend",
+      "title": "Critical & Warning Issues \u2014 Trend",
       "type": "timeseries",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_critical_issues_total{}", "legendFormat": "Critical", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_warning_issues_total{}", "legendFormat": "Warning", "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_info_issues_total{}", "legendFormat": "Info", "refId": "C" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_critical_issues_total{}",
+          "legendFormat": "Critical",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_warning_issues_total{}",
+          "legendFormat": "Warning",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_info_issues_total{}",
+          "legendFormat": "Info",
+          "refId": "C"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 20, "gradientMode": "opacity", "lineWidth": 2, "showPoints": "auto", "spanNulls": false }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Evictions" },  "properties": [ { "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "OOMKills" },   "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "CrashLoops" }, "properties": [ { "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Evictions"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OOMKills"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CrashLoops"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
       "id": 21,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "New Evictions / OOMKills / CrashLoops — Cumulative Counter",
+      "title": "New Evictions / OOMKills / CrashLoops \u2014 Cumulative Counter",
       "description": "Counters only increment when a NEW issue appears for the first time. Persistent issues from prior cycles are not re-counted.",
       "type": "timeseries",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_evictions_detected_total{}", "legendFormat": "Evictions", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_oomkills_detected_total{}", "legendFormat": "OOMKills", "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sre_crashloops_detected_total{}", "legendFormat": "CrashLoops", "refId": "C" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_evictions_detected_total{}",
+          "legendFormat": "Evictions",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_oomkills_detected_total{}",
+          "legendFormat": "OOMKills",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sre_crashloops_detected_total{}",
+          "legendFormat": "CrashLoops",
+          "refId": "C"
+        }
       ]
     },
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
       "id": 103,
-      "title": "📦 Pod Lifecycle — Historical (kube-state-metrics)",
+      "title": "\ud83d\udce6 Pod Lifecycle \u2014 Historical (kube-state-metrics)",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Running" },   "properties": [ { "id": "color", "value": { "fixedColor": "green",  "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Pending" },   "properties": [ { "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Failed" },    "properties": [ { "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Succeeded" }, "properties": [ { "id": "color", "value": { "fixedColor": "blue",   "mode": "fixed" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Pending"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Succeeded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
       "id": 30,
       "options": {
-        "legend": { "calcs": ["lastNotNull","max","min"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "title": "Pod Phases — All Namespaces",
-      "type": "timeseries",
-      "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_status_phase{phase=\"Running\"})",   "legendFormat": "Running",   "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_status_phase{phase=\"Pending\"})",   "legendFormat": "Pending",   "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_status_phase{phase=\"Failed\"})",    "legendFormat": "Failed",    "refId": "C" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_status_phase{phase=\"Succeeded\"})", "legendFormat": "Succeeded", "refId": "D" }
-      ]
-    },
-
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "min"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "title": "Pod Phases \u2014 All Namespaces",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_status_phase{phase=\"Running\"})",
+          "legendFormat": "Running",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_status_phase{phase=\"Pending\"})",
+          "legendFormat": "Pending",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_status_phase{phase=\"Failed\"})",
+          "legendFormat": "Failed",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_status_phase{phase=\"Succeeded\"})",
+          "legendFormat": "Succeeded",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
       "id": 31,
       "options": {
-        "legend": { "calcs": ["lastNotNull","max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "title": "Running Pods per Namespace",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (namespace) (kube_pod_status_phase{phase=\"Running\"})",
           "legendFormat": "{{namespace}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Evicted" },   "properties": [ { "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "OOMKilled" }, "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Evicted"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OOMKilled"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
       "id": 32,
       "options": {
-        "legend": { "calcs": ["lastNotNull","sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "title": "Evicted & OOMKilled Pods — Historical Count",
-      "type": "timeseries",
-      "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_status_reason{reason=\"Evicted\"})", "legendFormat": "Evicted", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"})", "legendFormat": "OOMKilled", "refId": "B" }
-      ]
-    },
-
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
-      "id": 33,
-      "options": {
-        "legend": { "calcs": ["lastNotNull","max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      },
-      "title": "HPA Replicas — Scaling History",
+      "title": "Evicted & OOMKilled Pods \u2014 Historical Count",
       "type": "timeseries",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "kube_horizontalpodautoscaler_status_current_replicas", "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (current)", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "kube_horizontalpodautoscaler_spec_max_replicas",        "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (max)",     "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "kube_horizontalpodautoscaler_spec_min_replicas",        "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (min)",     "refId": "C" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_status_reason{reason=\"Evicted\"})",
+          "legendFormat": "Evicted",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"})",
+          "legendFormat": "OOMKilled",
+          "refId": "B"
+        }
       ]
     },
-
     {
-      "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
-      "id": 108,
-      "title": "🔁 Top Restarting Pods",
-      "type": "row"
-    },
-
-    {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 20 } ] }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 33,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "title": "HPA Replicas \u2014 Scaling History",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas",
+          "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (current)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas",
+          "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (max)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "kube_horizontalpodautoscaler_spec_min_replicas",
+          "legendFormat": "{{namespace}}/{{horizontalpodautoscaler}} (min)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 108,
+      "title": "\ud83d\udd01 Top Restarting Pods",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Value" },     "properties": [ { "id": "displayName", "value": "Restarts" }, { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } }, { "id": "custom.width", "value": 100 } ] },
-          { "matcher": { "id": "byName", "options": "namespace" }, "properties": [ { "id": "displayName", "value": "Namespace" } ] },
-          { "matcher": { "id": "byName", "options": "pod" },       "properties": [ { "id": "displayName", "value": "Pod" } ] },
-          { "matcher": { "id": "byName", "options": "container" }, "properties": [ { "id": "displayName", "value": "Container" } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Restarts"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pod"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Pod"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "container"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Container"
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 45 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 65
+      },
       "id": 40,
       "options": {
         "cellHeight": "sm",
-        "footer": { "show": false },
+        "footer": {
+          "show": false
+        },
         "showHeader": true,
-        "sortBy": [{ "desc": true, "displayName": "Restarts" }]
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Restarts"
+          }
+        ]
       },
-      "title": "Top 15 — Containers by Restart Count",
+      "title": "Top 15 \u2014 Containers by Restart Count",
       "transformations": [
-        { "id": "labelsToFields", "options": { "mode": "columns" } },
-        { "id": "filterFieldsByName", "options": { "include": { "names": ["namespace","pod","container","Value"] } } }
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "namespace",
+                "pod",
+                "container",
+                "Value"
+              ]
+            }
+          }
+        }
       ],
       "type": "table",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "topk(15, kube_pod_container_status_restarts_total{} > 0)",
           "instant": true,
           "legendFormat": "__auto",
@@ -515,176 +1616,517 @@
         }
       ]
     },
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
       "id": 105,
-      "title": "💰 Resource Consumption & Cost by Pod — Historical",
+      "title": "\ud83d\udcb0 Resource Consumption & Cost by Pod \u2014 Historical",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Actual CPU usage (not requests). Uses cAdvisor metrics scraped by kube-prometheus-stack. Shows top 10 pods by real consumption — useful for spotting runaway processes and cost attribution.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Actual CPU usage (not requests). Uses cAdvisor metrics scraped by kube-prometheus-stack. Shows top 10 pods by real consumption \u2014 useful for spotting runaway processes and cost attribution.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": false },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false
+          },
           "unit": "short"
         }
       },
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 54 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      },
       "id": 50,
       "options": {
-        "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "right", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Top 10 Pods — CPU Usage (actual cores)",
+      "title": "Top 10 Pods \u2014 CPU Usage (actual cores)",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "topk(10, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!=\"POD\",container!=\"\",namespace!~\"kube-system|monitoring\"}[5m])))",
           "legendFormat": "{{namespace}}/{{pod}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Actual memory working set. Top 10 pods by real memory consumption — use this to find memory leaks and right-size your resource limits.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Actual memory working set. Top 10 pods by real memory consumption \u2014 use this to find memory leaks and right-size your resource limits.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": false },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false
+          },
           "unit": "bytes"
         }
       },
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 54 },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
       "id": 51,
       "options": {
-        "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "right", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Top 10 Pods — Memory Usage (actual bytes)",
+      "title": "Top 10 Pods \u2014 Memory Usage (actual bytes)",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "topk(10, sum by (namespace, pod) (container_memory_working_set_bytes{container!=\"POD\",container!=\"\",namespace!~\"kube-system|monitoring\"}))",
           "legendFormat": "{{namespace}}/{{pod}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "CPU usage (actual cores) grouped by namespace over time. Use the time range selector to see last week or last month.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 30, "gradientMode": "opacity", "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
           "unit": "short"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 63 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
       "id": 53,
       "options": {
-        "legend": { "calcs": ["mean","max","lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "CPU Usage by Namespace (actual) — Historical",
+      "title": "CPU Usage by Namespace (actual) \u2014 Historical",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"POD\",container!=\"\"}[5m]))",
           "legendFormat": "{{namespace}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Memory usage (actual bytes) grouped by namespace over time. Use the time range selector to see last week or last month.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 30, "gradientMode": "opacity", "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
           "unit": "bytes"
         }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 63 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
       "id": 54,
       "options": {
-        "legend": { "calcs": ["mean","max","lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Memory Usage by Namespace (actual) — Historical",
+      "title": "Memory Usage by Namespace (actual) \u2014 Historical",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (namespace) (container_memory_working_set_bytes{container!=\"POD\",container!=\"\"})",
           "legendFormat": "{{namespace}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "description": "Estimated monthly cost per namespace based on CPU + memory REQUESTS. Formula: (cpu_cores × $0.025/hr + mem_GiB × $0.0015/hr) × 720 hours/month. Adjust multipliers to match your OCI node shape pricing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Estimated monthly cost per namespace based on CPU + memory REQUESTS. Formula: (cpu_cores \u00d7 $0.025/hr + mem_GiB \u00d7 $0.0015/hr) \u00d7 720 hours/month. Adjust multipliers to match your OCI node shape pricing.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 200
+              }
+            ]
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "namespace" },          "properties": [ { "id": "displayName", "value": "Namespace" }, { "id": "custom.width", "value": 180 } ] },
-          { "matcher": { "id": "byName", "options": "CPU Req (m)" },        "properties": [ { "id": "displayName", "value": "CPU Request (m)" }, { "id": "unit", "value": "short" }, { "id": "custom.width", "value": 120 }, { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ {"color":"green","value":null}, {"color":"yellow","value":2000}, {"color":"red","value":8000} ] } } ] },
-          { "matcher": { "id": "byName", "options": "Mem Req (Mi)" },       "properties": [ { "id": "displayName", "value": "Memory Request (Mi)" }, { "id": "unit", "value": "short" }, { "id": "custom.width", "value": 140 }, { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [ {"color":"green","value":null}, {"color":"yellow","value":4096}, {"color":"red","value":16384} ] } } ] },
-          { "matcher": { "id": "byName", "options": "Est $/month" },        "properties": [ { "id": "displayName", "value": "Est. Cost/Month (USD)" }, { "id": "unit", "value": "currencyUSD" }, { "id": "custom.width", "value": 160 }, { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              },
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "CPU Req (m)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "CPU Request (m)"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 120
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 2000
+                    },
+                    {
+                      "color": "red",
+                      "value": 8000
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Mem Req (Mi)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Memory Request (Mi)"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 4096
+                    },
+                    {
+                      "color": "red",
+                      "value": 16384
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Est $/month"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Est. Cost/Month (USD)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.width",
+                "value": 160
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 71 },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 91
+      },
       "id": 52,
       "options": {
         "cellHeight": "sm",
-        "footer": { "countRows": false, "reducer": ["sum"], "show": true, "fields": ["CPU Req (m)", "Mem Req (Mi)", "Est $/month"] },
+        "footer": {
+          "countRows": false,
+          "reducer": [
+            "sum"
+          ],
+          "show": true,
+          "fields": [
+            "CPU Req (m)",
+            "Mem Req (Mi)",
+            "Est $/month"
+          ]
+        },
         "showHeader": true,
-        "sortBy": [{ "desc": true, "displayName": "Est $/month" }]
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Est $/month"
+          }
+        ]
       },
       "title": "Resource Requests & Estimated Monthly Cost by Namespace (snapshot)",
       "transformations": [
-        { "id": "labelsToFields", "options": { "mode": "columns" } },
-        { "id": "filterFieldsByName", "options": { "include": { "names": ["namespace","Value #A","Value #B","Value #C"] } } },
-        { "id": "joinByField", "options": { "byField": "namespace", "mode": "outer" } },
-        { "id": "organize", "options": { "renameByName": { "Value #A": "CPU Req (m)", "Value #B": "Mem Req (Mi)", "Value #C": "Est $/month" } } }
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "namespace",
+                "Value #A",
+                "Value #B",
+                "Value #C"
+              ]
+            }
+          }
+        },
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "namespace",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "Value #A": "CPU Req (m)",
+              "Value #B": "Mem Req (Mi)",
+              "Value #C": "Est $/month"
+            }
+          }
+        }
       ],
       "type": "table",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"}) * 1000",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"memory\"}) / 1024 / 1024",
           "instant": true,
           "legendFormat": "__auto",
           "refId": "B"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "(sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"}) * 0.025 + sum by (namespace) (kube_pod_container_resource_requests{resource=\"memory\"}) / 1024 / 1024 / 1024 * 0.0015) * 720",
           "instant": true,
           "legendFormat": "__auto",
@@ -692,34 +2134,71 @@
         }
       ]
     },
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 80 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 100
+      },
       "id": 106,
-      "title": "🖥 Node Resource Pressure",
+      "title": "\ud83d\udda5 Node Resource Pressure",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "How much total memory limits exceed node allocatable memory. >100% means OOM kills are possible if all pods hit their limits simultaneously.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "max": 200,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "orange", "value": 120 }, { "color": "red", "value": 150 } ] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "orange",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 150
+              }
+            ]
+          },
           "unit": "percent"
         }
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 81 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 101
+      },
       "id": 60,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "showThresholdLabels": true,
         "showThresholdMarkers": true
       },
@@ -727,33 +2206,69 @@
       "type": "gauge",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (node) (kube_pod_container_resource_limits{resource=\"memory\"}) / on(node) kube_node_status_allocatable{resource=\"memory\"} * 100",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "How much total CPU limits exceed node allocatable CPU. >100% means CPU throttling under load.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
+          "color": {
+            "mode": "thresholds"
+          },
           "max": 200,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 80 }, { "color": "orange", "value": 120 }, { "color": "red", "value": 150 } ] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 80
+              },
+              {
+                "color": "orange",
+                "value": 120
+              },
+              {
+                "color": "red",
+                "value": 150
+              }
+            ]
+          },
           "unit": "percent"
         }
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 81 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 101
+      },
       "id": 61,
       "options": {
         "minVizHeight": 75,
         "minVizWidth": 75,
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
         "showThresholdLabels": true,
         "showThresholdMarkers": true
       },
@@ -761,110 +2276,362 @@
       "type": "gauge",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (node) (kube_pod_container_resource_limits{resource=\"cpu\"}) / on(node) kube_node_status_allocatable{resource=\"cpu\"} * 100",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Number of Running pods per node over time. An uneven distribution can indicate a scheduling or resource problem.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         }
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 81 },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 101
+      },
       "id": 62,
       "options": {
-        "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Pods per Node — Running",
+      "title": "Pods per Node \u2014 Running",
       "type": "timeseries",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "sum by (node) (\n  kube_pod_info{node!=\"\"}\n  * on(pod, namespace) group_left()\n  kube_pod_status_phase{phase=\"Running\"}\n)",
           "legendFormat": "{{node}}",
           "refId": "A"
         }
       ]
     },
-
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 89 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 109
+      },
       "id": 107,
-      "title": "🚀 Deployment Health",
+      "title": "\ud83d\ude80 Deployment Health",
       "type": "row"
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "Available" },   "properties": [ { "id": "color", "value": { "fixedColor": "green",  "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Unavailable" }, "properties": [ { "id": "color", "value": { "fixedColor": "red",    "mode": "fixed" } } ] },
-          { "matcher": { "id": "byName", "options": "Desired" },     "properties": [ { "id": "color", "value": { "fixedColor": "blue",   "mode": "fixed" } }, { "id": "custom.lineStyle", "value": { "dash": [10,10], "fill": "dash" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Available"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unavailable"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Desired"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 90 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 110
+      },
       "id": 70,
       "options": {
-        "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
-      "title": "Deployment Replicas — Available vs Desired",
+      "title": "Deployment Replicas \u2014 Available vs Desired",
       "type": "timeseries",
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_deployment_status_replicas_available{})", "legendFormat": "Available",  "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_deployment_spec_replicas{})",               "legendFormat": "Desired",    "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(kube_deployment_status_replicas_unavailable{})",  "legendFormat": "Unavailable","refId": "C" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_deployment_status_replicas_available{})",
+          "legendFormat": "Available",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_deployment_spec_replicas{})",
+          "legendFormat": "Desired",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(kube_deployment_status_replicas_unavailable{})",
+          "legendFormat": "Unavailable",
+          "refId": "C"
+        }
       ]
     },
-
     {
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "description": "Deployments that currently have fewer available replicas than desired. These are actively degraded workloads.",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "wrap": false },
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "wrap": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "namespace" },   "properties": [ { "id": "displayName", "value": "Namespace" }, { "id": "custom.width", "value": 160 } ] },
-          { "matcher": { "id": "byName", "options": "deployment" },  "properties": [ { "id": "displayName", "value": "Deployment" } ] },
-          { "matcher": { "id": "byName", "options": "Value" },       "properties": [ { "id": "displayName", "value": "Unavailable" }, { "id": "custom.width", "value": 110 }, { "id": "custom.cellOptions", "value": { "mode": "basic", "type": "color-background" } } ] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              },
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "deployment"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Deployment"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Unavailable"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "mode": "basic",
+                  "type": "color-background"
+                }
+              }
+            ]
+          }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 90 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 110
+      },
       "id": 71,
       "options": {
         "cellHeight": "sm",
-        "footer": { "show": false },
+        "footer": {
+          "show": false
+        },
         "showHeader": true,
-        "sortBy": [{ "desc": true, "displayName": "Value" }]
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Value"
+          }
+        ]
       },
       "title": "Deployments with Unavailable Replicas",
       "transformations": [
-        { "id": "labelsToFields", "options": { "mode": "columns" } },
-        { "id": "filterFieldsByName", "options": { "include": { "names": ["namespace","deployment","Value"] } } },
-        { "id": "filterByValue", "options": { "filters": [{ "config": { "id": "greater", "options": { "value": 0 } }, "fieldName": "Value" }], "match": "all", "type": "include" } }
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "namespace",
+                "deployment",
+                "Value"
+              ]
+            }
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "config": {
+                  "id": "greater",
+                  "options": {
+                    "value": 0
+                  }
+                },
+                "fieldName": "Value"
+              }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        }
       ],
       "type": "table",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "kube_deployment_status_replicas_unavailable{} > 0",
           "instant": true,
           "legendFormat": "__auto",
@@ -872,11 +2639,14 @@
         }
       ]
     }
-
   ],
   "refresh": "1m",
   "schemaVersion": 38,
-  "tags": ["kubernetes", "sre", "cluster-health"],
+  "tags": [
+    "kubernetes",
+    "sre",
+    "cluster-health"
+  ],
   "templating": {
     "list": [
       {
@@ -893,10 +2663,13 @@
       }
     ]
   },
-  "time": { "from": "now-24h", "to": "now" },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
-  "title": "SRE Agent — Cluster Health",
+  "title": "SRE Agent \u2014 Cluster Health",
   "uid": "sre-agent-cluster-health",
-  "version": 2
+  "version": 5
 }

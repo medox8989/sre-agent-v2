@@ -422,10 +422,6 @@ if PROMETHEUS_ENABLED:
         _g_duration.set(duration)
         _c_checks_run.inc()
 
-        # Zero out all previously tracked check labels before rebuilding
-        for sev, chk in _seen_check_labels:
-            _g_by_check.labels(severity=sev, check=chk).set(0)
-
         # Rebuild per-check counts and new-issue counters
         counts: Dict[Tuple[str, str], int] = {}
         current_keys: Set[Tuple[str, str]] = set()
@@ -447,10 +443,17 @@ if PROMETHEUS_ENABLED:
                 elif chk == "CrashLoopBackOff":
                     _c_crashloops.inc()
 
+        # Set NEW counts FIRST — no zero-window for active issues during Prometheus scrape
+        new_check_labels: Set[Tuple[str, str]] = set()
         for (sev, chk), cnt in counts.items():
             _g_by_check.labels(severity=sev, check=chk).set(cnt)
-            _seen_check_labels.add((sev, chk))
+            new_check_labels.add((sev, chk))
 
+        # THEN zero out only labels that are no longer active this cycle
+        for sev, chk in _seen_check_labels - new_check_labels:
+            _g_by_check.labels(severity=sev, check=chk).set(0)
+
+        _seen_check_labels = new_check_labels
         _prev_issue_keys = current_keys
 
     def _noop_setup():
