@@ -36,8 +36,8 @@ spec:
       containers:
         - name: sre-agent
           # ── IMPORTANT: update tag when you rebuild ──────────────────────
-          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v3
-          imagePullPolicy: IfNotPresent
+          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v4
+          imagePullPolicy: Always
 
           # Default: continuous loop.
           # On-demand: kubectl exec deploy/sre-agent -n sre-agent -- python agent.py --once

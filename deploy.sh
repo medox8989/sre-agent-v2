@@ -18,7 +18,7 @@
 set -euo pipefail
 
 NAMESPACE="sre-agent"
-OCIR_IMAGE="jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v3"
+OCIR_IMAGE="jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$SCRIPT_DIR/k8s"
 
