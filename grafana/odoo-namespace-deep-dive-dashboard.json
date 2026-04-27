@@ -1,0 +1,1416 @@
+{
+  "title": "Odoo \u2014 Per Namespace: CPU / RAM / Overlay / PVC / Workers",
+  "uid": "odoo-ns-deep-dive",
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "\u2139\ufe0f Zero-change monitoring \u2014 how it works",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "All metrics come from **cAdvisor** (built into kubelet) and **kube-state-metrics** \u2014 both already running. No changes to Odoo pods, no addons, no sidecars.\n\n**Overlay** = the container writable layer (files written inside the container above the image). Grows when Odoo writes logs, temp files, or any path not on a mounted volume. High overlay = files escaping your PVCs \u2192 will fill the node's container runtime disk.\n\n> Worker counts use the process-exporter DaemonSet (already deployed). Because multiple namespaces share nodes, worker counts show the node total \u2014 divide by number of Odoo instances on that node for per-namespace estimate."
+      },
+      "datasource": null
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "\ud83d\udcca Live Snapshot \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "CPU Cores Used",
+      "description": "Total CPU cores consumed across all Odoo containers in selected namespaces.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 4
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "CPU Throttling",
+      "description": "% of CPU scheduling periods throttled. >20% = CPU limit is too tight \u2192 slow responses even at low CPU%.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "avg(rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]) / clamp_min(rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]),0.001))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "red",
+                "value": 0.4
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Memory RSS",
+      "description": "Resident Set Size \u2014 actual physical RAM in use. Does not include file cache.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(container_memory_rss{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4000000000.0
+              },
+              {
+                "color": "red",
+                "value": 6000000000.0
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Memory Limit Usage",
+      "description": "Working set \u00f7 memory limit. >85% risks OOM kill.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "max(container_memory_working_set_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"} / clamp_min(container_spec_memory_limit_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"},1))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.85
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Container Restarts",
+      "description": "Total restarts for Odoo containers since pod creation. High = repeated OOM kills or crashes.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\",container=~\"$container\"}[24h]))",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "OOM Kills (24h)",
+      "description": "Containers OOM-killed in last 24 hours.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(kube_pod_container_status_last_terminated_reason{namespace=~\"$namespace\",container=~\"$container\",reason=\"OOMKilled\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "\ud83d\udda5 CPU \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "CPU Usage \u2014 All Namespaces (stacked)",
+      "description": "CPU cores consumed per Odoo container per namespace. Stacked = total cluster Odoo CPU load.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "CPU Throttling % \u2014 Per Namespace",
+      "description": "% of time Odoo was throttled due to CPU limits. >20% = workers are slow despite free CPU on the node. Fix: raise cpu limit or reduce --workers.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "targets": [
+        {
+          "expr": "100 * sum by (namespace)(rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval])) / clamp_min(sum by (namespace)(rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval])),0.001)",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "\ud83e\udde0 Memory \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "collapsed": false
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Memory RSS \u2014 Per Namespace",
+      "description": "Resident Set Size per namespace. Steady growth = memory leak. Odoo respawns workers when they hit --limit-memory-soft.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(container_memory_rss{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Memory Working Set vs Limit \u2014 Per Namespace",
+      "description": "Working set (active memory) vs configured memory limit. Approaching 1.0 = imminent OOM kill.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(container_memory_working_set_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "{{namespace}} used",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (namespace)(container_spec_memory_limit_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "{{namespace}} limit",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "\ud83d\udcbe Container Overlay (Writable Layer) \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "collapsed": false
+    },
+    {
+      "id": 400,
+      "type": "text",
+      "title": "What is overlay storage?",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Every container gets a **writable overlay layer** on top of its image. In OKE/containerd this lives at `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/`. It grows when Odoo writes to any path NOT on a mounted volume: `/tmp`, `/var/log/odoo/` (if not on PVC), session files, addons cache, etc.\n\n**High overlay = risk**: fills the node's root disk, not your PVC \u2192 node runs out of disk space \u2192 all pods on that node evicted. Fix: mount a volume for `/var/log/odoo` and `/tmp` or reduce Odoo log verbosity."
+      },
+      "datasource": null
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Overlay Size Over Time \u2014 Per Namespace",
+      "description": "container_fs_usage_bytes = writable layer size (what the container wrote above the image). Each namespace's Odoo container overlay. Rising = Odoo is writing to unvolume'd paths.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(container_fs_usage_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Overlay Growth Rate (bytes/hour)",
+      "description": "Rate of overlay growth per namespace. Sustained >0 = files accumulating (logs, tmp, cache). Zero = overlay is stable (writes go to volumes).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_fs_usage_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[1h]) * 3600)",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 43,
+      "type": "table",
+      "title": "Overlay Usage \u2014 All Pods (instant snapshot)",
+      "description": "Sorted by overlay size. Identify which specific pod is consuming the most writable layer space.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "targets": [
+        {
+          "expr": "container_fs_usage_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}",
+          "legendFormat": "Overlay Bytes",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "container_fs_limit_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}",
+          "legendFormat": "Overlay Limit",
+          "refId": "B",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        }
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "id": true,
+              "metrics_path": true,
+              "endpoint": true,
+              "node": true,
+              "service": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "Overlay Bytes",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "\ud83d\uddc4 PVC / Volume Storage \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "PVC Used vs Capacity \u2014 Per Namespace",
+      "description": "Actual data on persistent volumes (filestore, attachments, DB data). This is where your PDFs and Odoo data live.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 47
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(kubelet_volume_stats_used_bytes{namespace=~\"$namespace\"})",
+          "legendFormat": "{{namespace}} used",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (namespace)(kubelet_volume_stats_capacity_bytes{namespace=~\"$namespace\"})",
+          "legendFormat": "{{namespace}} capacity",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "PVC Fill Rate \u2014 Time to Full (predict_linear)",
+      "description": "Predicted time until PVCs fill up based on growth over the last 24h. Negative = volume is shrinking.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 47
+      },
+      "targets": [
+        {
+          "expr": "predict_linear(kubelet_volume_stats_free_bytes{namespace=~\"$namespace\"}[24h], 3600*24*7)",
+          "legendFormat": "{{namespace}} free in 7d (bytes)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 53,
+      "type": "table",
+      "title": "PVC Usage Details \u2014 All Namespaces",
+      "description": "All PVCs: used, available, capacity, and % used. Filter by namespace.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "targets": [
+        {
+          "expr": "kubelet_volume_stats_used_bytes{namespace=~\"$namespace\"}",
+          "legendFormat": "Used",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "kubelet_volume_stats_capacity_bytes{namespace=~\"$namespace\"}",
+          "legendFormat": "Capacity",
+          "refId": "B",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "kubelet_volume_stats_available_bytes{namespace=~\"$namespace\"}",
+          "legendFormat": "Available",
+          "refId": "C",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "100 * kubelet_volume_stats_used_bytes{namespace=~\"$namespace\"} / clamp_min(kubelet_volume_stats_capacity_bytes{namespace=~\"$namespace\"},1)",
+          "legendFormat": "% Used",
+          "refId": "D",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        }
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "endpoint": true,
+              "service": true,
+              "metrics_path": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "% Used",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "\u26a1 Disk I/O \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "collapsed": false
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Container Disk Writes \u2014 Per Namespace",
+      "description": "Bytes written per second to the overlay or any filesystem. High writes = Odoo is writing lots of data (attachments, logs, reports).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_fs_writes_bytes_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Container Disk Reads \u2014 Per Namespace",
+      "description": "Bytes read per second. High reads = Odoo is reading large files or doing heavy DB I/O via mmap.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_fs_reads_bytes_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "\ud83c\udf10 Network I/O \u2014 Per Namespace",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "collapsed": false
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Network Receive \u2014 Per Namespace",
+      "description": "Inbound traffic to Odoo pods. High = users uploading files or heavy API traffic.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 73
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_network_receive_bytes_total{namespace=~\"$namespace\",container=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Network Transmit \u2014 Per Namespace",
+      "description": "Outbound traffic from Odoo pods. High = serving large responses, PDF generation, bulk exports.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 73
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_network_transmit_bytes_total{namespace=~\"$namespace\",container=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 80,
+      "type": "row",
+      "title": "\ud83d\udc77 Worker Processes \u2014 Node-Level (process-exporter)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 81
+      },
+      "collapsed": false
+    },
+    {
+      "id": 800,
+      "type": "text",
+      "title": "Note on worker counts",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Worker counts come from **process-exporter** (already deployed as DaemonSet). Because it reads from the **node's /proc**, it sees all Odoo processes on that node \u2014 not filtered by namespace. Filter by Node to see the workers for a specific node where your namespace's pod runs.\n\nFind your pod's node: `kubectl get pod -n <namespace> -o wide`"
+      },
+      "datasource": null
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "Odoo Worker Processes Per Node (process-exporter)",
+      "description": "Total odoo_workers (master+HTTP+cron) and gevent per node. With workers=7: expect 9 in odoo_workers + 1 gevent per Odoo instance on that node.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 85
+      },
+      "targets": [
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_workers\"}",
+          "legendFormat": "workers {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "namedprocess_namegroup_num_procs{groupname=\"odoo_gevent\"}",
+          "legendFormat": "gevent {{node}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 82,
+      "type": "timeseries",
+      "title": "Worker CPU \u2014 Per Node",
+      "description": "CPU consumed by all Odoo worker processes on each node.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 85
+      },
+      "targets": [
+        {
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_workers\"}[$__rate_interval])",
+          "legendFormat": "workers {{node}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(namedprocess_namegroup_cpu_seconds_total{groupname=\"odoo_gevent\"}[$__rate_interval])",
+          "legendFormat": "gevent {{node}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "last"
+          ]
+        }
+      },
+      "datasource": {
+        "type": "prometheus"
+      }
+    },
+    {
+      "id": 90,
+      "type": "row",
+      "title": "\ud83d\udccb Namespace Comparison \u2014 Instant Snapshot",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      },
+      "collapsed": false
+    },
+    {
+      "id": 91,
+      "type": "table",
+      "title": "All Namespaces \u2014 CPU \u00d7 Memory \u00d7 Overlay \u00d7 PVC \u00d7 Restarts",
+      "description": "One row per namespace. Compare all your Odoo clients side by side.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace)(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"}[5m]))",
+          "legendFormat": "CPU cores",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "sum by (namespace)(container_memory_rss{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "Memory RSS",
+          "refId": "B",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "sum by (namespace)(container_memory_working_set_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "Working Set",
+          "refId": "C",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "sum by (namespace)(container_fs_usage_bytes{namespace=~\"$namespace\",container=~\"$container\",container!=\"\",container!=\"POD\"})",
+          "legendFormat": "Overlay Size",
+          "refId": "D",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "sum by (namespace)(kubelet_volume_stats_used_bytes{namespace=~\"$namespace\"})",
+          "legendFormat": "PVC Used",
+          "refId": "E",
+          "instant": true,
+          "range": false
+        },
+        {
+          "expr": "sum by (namespace)(increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\",container=~\"$container\"}[24h]))",
+          "legendFormat": "Restarts 24h",
+          "refId": "F",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true
+          }
+        }
+      },
+      "options": {
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "endpoint": true,
+              "pod": true,
+              "container": true,
+              "service": true,
+              "metrics_path": true
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "displayName": "CPU cores",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
+      "datasource": {
+        "type": "prometheus"
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "label": "Namespace",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "query": {
+          "query": "label_values(container_cpu_usage_seconds_total{container=~\".*odoo.*\", container!=\"\", container!=\"POD\"}, namespace)",
+          "refId": "Q"
+        },
+        "datasource": {
+          "type": "prometheus"
+        },
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "container",
+        "type": "custom",
+        "label": "Container name",
+        "query": "odoo",
+        "current": {
+          "text": "odoo",
+          "value": "odoo"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "odoo",
+            "value": "odoo"
+          },
+          {
+            "selected": false,
+            "text": ".*odoo.*",
+            "value": ".*odoo.*"
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "tags": [
+    "odoo",
+    "namespace",
+    "overlay",
+    "storage",
+    "workers"
+  ]
+}

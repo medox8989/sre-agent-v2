@@ -61,6 +61,8 @@ OLD_RS_DAYS          = int(os.getenv("OLD_RS_THRESHOLD_DAYS", "3"))
 OLD_FAILED_POD_HOURS = int(os.getenv("OLD_FAILED_POD_HOURS",  "2"))
 OVERCOMMIT_WARN_PCT  = int(os.getenv("OVERCOMMIT_WARN_PERCENT","120"))
 EVENTS_LOOKBACK_H    = int(os.getenv("EVENTS_LOOKBACK_HOURS", "2"))
+SCALING_RECENT_MINS  = int(os.getenv("SCALING_RECENT_MINUTES", "15"))
+SCALING_HISTORY_H    = int(os.getenv("SCALING_HISTORY_HOURS",  "6"))
 
 SKIP_NS = {
     "kube-system","cert-manager","monitoring",
@@ -483,6 +485,54 @@ _REC: Dict[str, Dict[str, str]] = {
         "prevent":    "Default: drop ALL capabilities and add back only what is required. "
                       "securityContext.capabilities.drop: [ALL], then add: only the specific caps needed.",
     },
+    # ── Scaling / HPA incident patterns ─────────────────────────────────────
+    "HPAFlapping": {
+        "root_cause": "HPA triggered a scale-up but scaled back down before the new pod became ready. "
+                      "Typical causes: (1) large image pull time (4GB = 2+ min) keeps the pod 'unready', "
+                      "causing HPA metrics to drop once the new pod is counted in the replica set; "
+                      "(2) HPA downscale-stabilization window too short (default 5 min); "
+                      "(3) CPU spike was transient — load was gone by the time the new node joined.",
+        "immediate":  "Set HPA scaleDown.stabilizationWindowSeconds: 300 (or higher). "
+                      "Set minReplicas ≥ 2 so scale-up starts from a warm base. "
+                      "Reduce image size (multi-stage build, target <1 GB) to shorten pull time.",
+        "prevent":    "Add HPA behavior block: scaleDown.stabilizationWindowSeconds: 600. "
+                      "Pre-pull images on nodes using a DaemonSet or node start-up script. "
+                      "Use image digests + IfNotPresent so nodes that already have the image start instantly.",
+    },
+    "CNINotReady": {
+        "root_cause": "Cluster autoscaler added a new node, but the Flannel CNI DaemonSet pod "
+                      "on that node had not finished writing /run/flannel/subnet.env before the workload "
+                      "pod was scheduled. Flannel must contact the API server and allocate a subnet first — "
+                      "this takes 30–90 seconds on a freshly booted OKE node.",
+        "immediate":  "This self-heals: kubelet retries sandbox creation. If stuck, delete the pod: "
+                      "kubectl delete pod <pod> -n <ns> to force a reschedule. "
+                      "Check Flannel on node: kubectl get pod -n kube-system -l app=flannel -o wide",
+        "prevent":    "Ensure Flannel DaemonSet has priorityClassName: system-node-critical. "
+                      "Configure cluster-autoscaler with --balance-similar-node-groups. "
+                      "Add a node startup taint that is removed only after Flannel is ready (init DaemonSet pattern).",
+    },
+    "HPAMetricLag": {
+        "root_cause": "After a pod is evicted/rescheduled its IP changes. The metrics-server scrapes "
+                      "kubelet for pod CPU/memory — it takes 1–2 scrape intervals (60s total) before "
+                      "metrics return. During this gap the HPA sees 'no metrics' and cannot scale. "
+                      "This is normal behaviour but can mask a real load spike.",
+        "immediate":  "No action needed — this is transient. Verify: kubectl top pod -n <ns>. "
+                      "If persistent (>5 min): kubectl get apiservice v1beta1.metrics.k8s.io -o yaml",
+        "prevent":    "Keep minReplicas ≥ 2 so HPA always has at least one pod reporting metrics. "
+                      "Set metrics-server --metric-resolution=15s to shorten the lag. "
+                      "Use behavior.scaleUp.stabilizationWindowSeconds: 60 to prevent premature decisions.",
+    },
+    "NodeScaleDelay": {
+        "root_cause": "OKE node provisioning takes 2–5 minutes: VM boot, kubelet start, node registration, "
+                      "DaemonSet scheduling (Flannel, kube-proxy), CNI initialization. "
+                      "Workload pods remain Pending for this entire window. "
+                      "If the CPU spike that triggered scale-up was transient, load is gone before the node joins.",
+        "immediate":  "Wait for the node to become Ready: kubectl get nodes -w. "
+                      "Check autoscaler progress: kubectl logs -n kube-system -l app=cluster-autoscaler --tail=50",
+        "prevent":    "Keep a small buffer of spare capacity with a low-priority placeholder Deployment. "
+                      "Set HPA scaleUp triggers at lower CPU% (e.g. 60%) so scale-up starts earlier. "
+                      "Use OKE virtual nodes (serverless) for near-instant capacity if available in your region.",
+    },
 }
 
 
@@ -903,6 +953,296 @@ def check_events(core: client.CoreV1Api) -> List[Dict]:
             f"{msg}{count_str}", when=ts))
 
     return issues
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  SCALING & INCIDENT ANALYSIS                                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# Event reasons that indicate a scaling or scheduling event
+_SCALING_REASONS = frozenset({
+    "SuccessfulRescale",            # HPA scaled up or down
+    "FailedGetResourceMetric",      # HPA can't get CPU/memory metrics
+    "FailedComputeMetricsReplicas", # HPA can't compute target replicas
+    "FailedScheduling",             # Scheduler can't place pod
+    "Scheduled",                    # Pod finally placed on a node
+    "TriggeredScaleUp",             # Cluster autoscaler adding a node
+    "ScaleDown",                    # Cluster autoscaler removing a pod/node
+    "ScalingReplicaSet",            # Deployment scaled a replica set
+    "SuccessfulCreate",             # ReplicaSet created a pod
+    "SuccessfulDelete",             # ReplicaSet deleted a pod
+    "Killing",                      # Container/pod being stopped
+    "FailedCreatePodSandBox",       # CNI/network sandbox failure (Flannel etc.)
+    "Unhealthy",                    # Readiness/liveness probe failure during startup
+    "TaintManagerEviction",         # Taint-based eviction or cancellation
+})
+
+# Display color per reason (sev string, ANSI color var)
+_REASON_SEV = {
+    "FailedScheduling":              ("WARNING",  Y),
+    "FailedGetResourceMetric":       ("WARNING",  Y),
+    "FailedComputeMetricsReplicas":  ("WARNING",  Y),
+    "FailedCreatePodSandBox":        ("CRITICAL", R),
+    "Unhealthy":                     ("WARNING",  Y),
+    "SuccessfulRescale":             ("NORMAL",   G),
+    "TriggeredScaleUp":              ("NORMAL",   G),
+    "ScaleDown":                     ("NORMAL",   B),
+    "Scheduled":                     ("NORMAL",   G),
+    "ScalingReplicaSet":             ("NORMAL",   DM),
+    "SuccessfulCreate":              ("NORMAL",   DM),
+    "SuccessfulDelete":              ("NORMAL",   DM),
+    "Killing":                       ("NORMAL",   DM),
+    "TaintManagerEviction":          ("NORMAL",   DM),
+}
+
+
+def fetch_scaling_events(core: client.CoreV1Api,
+                          app_namespaces: Optional[List[str]] = None) -> List[Dict]:
+    """Fetch all scaling-related events for the last SCALING_HISTORY_H hours.
+
+    Fetches both Normal and Warning events, then filters by _SCALING_REASONS.
+    Returns a list sorted by timestamp (oldest first).
+    Each entry: ts, ts_str, age, type, reason, ns, obj, kind, message, count.
+    """
+    cutoff = _now() - timedelta(hours=SCALING_HISTORY_H)
+    results: List[Dict] = []
+    seen: Set[tuple] = set()
+
+    for ev_type in ("Warning", "Normal"):
+        try:
+            resp = core.list_event_for_all_namespaces(
+                field_selector=f"type={ev_type}", limit=600)
+            raw = resp.items
+        except ApiException:
+            continue
+
+        for ev in raw:
+            reason = ev.reason or ""
+            if reason not in _SCALING_REASONS:
+                continue
+
+            ts = ev.last_timestamp or ev.first_timestamp or ev.metadata.creation_timestamp
+            if not ts:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts < cutoff:
+                continue
+
+            ns = (ev.metadata.namespace
+                  or (ev.involved_object.namespace if ev.involved_object else None)
+                  or "?")
+            if app_namespaces and ns not in app_namespaces:
+                continue
+
+            obj = (ev.involved_object.name if ev.involved_object else None) or "?"
+            key = (ns, obj, reason, ts.strftime("%Y%m%d%H%M"))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            results.append({
+                "ts":      ts,
+                "ts_str":  ts.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "age":     _age(ts),
+                "type":    ev_type,
+                "reason":  reason,
+                "ns":      ns,
+                "obj":     obj,
+                "kind":    (ev.involved_object.kind if ev.involved_object else "") or "",
+                "message": (ev.message or "")[:250],
+                "count":   ev.count or 1,
+            })
+
+    results.sort(key=lambda x: x["ts"])
+    return results
+
+
+def get_hpa_status() -> List[Dict]:
+    """Fetch current HPA status for all non-system namespaces.
+
+    Tries AutoscalingV2 first, falls back to V1.
+    Returns a list of HPA info dicts.
+    """
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+
+    results: List[Dict] = []
+
+    for api_cls, use_v2 in [(client.AutoscalingV2Api, True),
+                             (client.AutoscalingV1Api, False)]:
+        try:
+            api = api_cls()
+            hpas = api.list_horizontal_pod_autoscaler_for_all_namespaces(limit=100)
+        except Exception:
+            continue
+
+        for hpa in hpas.items:
+            ns   = hpa.metadata.namespace
+            name = hpa.metadata.name
+            if ns in SKIP_NS:
+                continue
+
+            cur = hpa.status.current_replicas or 0
+            des = hpa.status.desired_replicas or 0
+            mn  = hpa.spec.min_replicas or 1
+            mx  = hpa.spec.max_replicas or 0
+
+            metrics_ok    = True
+            metric_lines: List[str] = []
+            conditions:   List[str] = []
+
+            if use_v2:
+                for cond in (hpa.status.conditions or []):
+                    if cond.type == "ScalingActive" and cond.status != "True":
+                        metrics_ok = False
+                        conditions.append(
+                            f"ScalingActive=False: {(cond.message or '')[:120]}")
+                    elif cond.type == "AbleToScale" and cond.status != "True":
+                        conditions.append(
+                            f"AbleToScale=False: {(cond.message or '')[:120]}")
+
+                for cm in (hpa.status.current_metrics or []):
+                    if cm.type == "Resource" and cm.resource:
+                        rname = cm.resource.name
+                        cv, tv = "?", "?"
+                        if cm.resource.current:
+                            if cm.resource.current.average_utilization:
+                                cv = f"{cm.resource.current.average_utilization}%"
+                            elif cm.resource.current.average_value:
+                                cv = str(cm.resource.current.average_value)
+                        for sm in (hpa.spec.metrics or []):
+                            if (sm.type == "Resource" and sm.resource
+                                    and sm.resource.name == rname):
+                                t = sm.resource.target
+                                if t.average_utilization:
+                                    tv = f"{t.average_utilization}%"
+                                elif t.average_value:
+                                    tv = str(t.average_value)
+                        metric_lines.append(f"{rname}: {cv}/{tv}")
+
+            if not metric_lines:
+                metric_lines = ["? (no current metrics reported)"]
+                metrics_ok = False
+
+            results.append({
+                "ns":         ns,
+                "name":       name,
+                "current":    cur,
+                "desired":    des,
+                "min":        mn,
+                "max":        mx,
+                "metrics":    metric_lines,
+                "metrics_ok": metrics_ok,
+                "conditions": conditions,
+            })
+        break  # success on first API version that works
+
+    return results
+
+
+def detect_incidents(events: List[Dict]) -> List[Dict]:
+    """Scan the event timeline and identify known problematic scaling patterns.
+
+    Detected patterns:
+      HPAFlapping     — scale-up then scale-down within 15 min
+      CNINotReady     — FailedCreatePodSandBox with Flannel/subnet.env error
+      HPAMetricLag    — 2+ consecutive FailedGetResourceMetric for same HPA
+      NodeScaleDelay  — TriggeredScaleUp followed by persistent FailedScheduling
+
+    Returns a list of incident dicts sorted by ts.
+    """
+    incidents: List[Dict] = []
+    by_ns: Dict[str, List[Dict]] = {}
+    for ev in events:
+        by_ns.setdefault(ev["ns"], []).append(ev)
+
+    for ns, ns_evs in by_ns.items():
+
+        # ── Pattern 1: HPAFlapping ───────────────────────────────────────────
+        rescales = sorted([e for e in ns_evs if e["reason"] == "SuccessfulRescale"],
+                          key=lambda x: x["ts"])
+        scale_ups   = [e for e in rescales if "above target" in e["message"].lower()]
+        scale_downs = [e for e in rescales if ("below target" in e["message"].lower()
+                                                or "all metrics below" in e["message"].lower())]
+        for su in scale_ups:
+            for sd in scale_downs:
+                delta = sd["ts"] - su["ts"]
+                if timedelta(seconds=0) < delta < timedelta(minutes=15):
+                    dm = max(1, int(delta.total_seconds() / 60))
+                    incidents.append({
+                        "type":     "HPAFlapping",
+                        "ns":       ns,
+                        "severity": "WARNING",
+                        "msg":      (f"HPA scaled up then scaled back down in {dm}m. "
+                                     f"New pod was not ready in time (large image pull or new node "
+                                     f"spin-up delay) — metrics fell below threshold before the pod "
+                                     f"could serve traffic."),
+                        "ts": su["ts"],
+                    })
+                    break  # one incident per scale-up event
+
+        # ── Pattern 2: CNI not ready on newly autoscaled node ────────────────
+        cni_fails = [e for e in ns_evs
+                     if e["reason"] == "FailedCreatePodSandBox"
+                     and ("flannel"     in e["message"].lower()
+                          or "subnet.env" in e["message"].lower()
+                          or "cni"        in e["message"].lower())]
+        if cni_fails:
+            incidents.append({
+                "type":     "CNINotReady",
+                "ns":       ns,
+                "severity": "CRITICAL",
+                "msg":      (f"Pod sandbox creation failed for {cni_fails[0]['obj']}: "
+                             f"Flannel CNI not yet initialized on newly autoscaled node. "
+                             f"/run/flannel/subnet.env was missing — node joined the cluster "
+                             f"before Flannel finished its startup."),
+                "ts": cni_fails[0]["ts"],
+            })
+
+        # ── Pattern 3: HPA metric lag ────────────────────────────────────────
+        mfails = [e for e in ns_evs
+                  if e["reason"] in ("FailedGetResourceMetric",
+                                     "FailedComputeMetricsReplicas")]
+        if len(mfails) >= 2:
+            first = min(mfails, key=lambda x: x["ts"])
+            last  = max(mfails, key=lambda x: x["ts"])
+            dm    = max(1, int((last["ts"] - first["ts"]).total_seconds() / 60))
+            hpa_names = ", ".join({e["obj"] for e in mfails})
+            incidents.append({
+                "type":     "HPAMetricLag",
+                "ns":       ns,
+                "severity": "WARNING",
+                "msg":      (f"HPA '{hpa_names}' had no metrics for ~{dm}m. "
+                             f"Metrics-server lost sight of pod after reschedule (IP changed). "
+                             f"HPA cannot make any scaling decisions during this window."),
+                "ts": first["ts"],
+            })
+
+        # ── Pattern 4: Node scale-up too slow ────────────────────────────────
+        trigger = next((e for e in ns_evs if e["reason"] == "TriggeredScaleUp"), None)
+        if trigger:
+            late_fails = [e for e in ns_evs
+                          if e["reason"] == "FailedScheduling"
+                          and e["ts"] > trigger["ts"]
+                          and (e["ts"] - trigger["ts"]) > timedelta(minutes=1)]
+            if late_fails:
+                dm = max(1, int((late_fails[-1]["ts"] - trigger["ts"]).total_seconds() / 60))
+                incidents.append({
+                    "type":     "NodeScaleDelay",
+                    "ns":       ns,
+                    "severity": "WARNING",
+                    "msg":      (f"Cluster autoscaler triggered node scale-up but pod "
+                                 f"remained unschedulable for {dm}m. "
+                                 f"OKE node provisioning (VM boot → kubelet → Flannel) "
+                                 f"takes 2–5 min — pods stay Pending for this entire window."),
+                    "ts": trigger["ts"],
+                })
+
+    incidents.sort(key=lambda x: x["ts"])
+    return incidents
 
 
 def check_pvcs(core: client.CoreV1Api) -> List[Dict]:
@@ -1572,6 +1912,178 @@ def print_report(report: Dict[str, Any]):
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
+# ║  SCALING INCIDENT PRINTER                                         ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def _wrap(text: str, width: int = 70, indent: str = "") -> List[str]:
+    """Word-wrap text into lines of at most `width` chars."""
+    words, lines, line = text.split(), [], []
+    for w in words:
+        if len(" ".join(line + [w])) > width and line:
+            lines.append(indent + " ".join(line))
+            line = [w]
+        else:
+            line.append(w)
+    if line:
+        lines.append(indent + " ".join(line))
+    return lines or [indent]
+
+
+def print_scaling_report(events: List[Dict], hpa_statuses: List[Dict],
+                          incidents: List[Dict], node_items: list):
+    """Print the two-part scaling incident analysis.
+
+    PART 1 — Historical events (older than SCALING_RECENT_MINS)
+    PART 2 — Current events   (last SCALING_RECENT_MINS minutes)
+    Plus: root-cause summary, HPA status, node schedulability.
+    """
+    recent_cutoff = _now() - timedelta(minutes=SCALING_RECENT_MINS)
+    now_str = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    print()
+    print(_line("━"))
+    print(f"{BD}{W}  🔍  SCALING INCIDENT ANALYSIS  │  {CLUSTER_NAME}  │  {now_str}{RS}")
+    print(_line("━"))
+    print(f"\n  {DM}History window : {SCALING_HISTORY_H}h   "
+          f"│  Recent window : last {SCALING_RECENT_MINS} min   "
+          f"│  Scaling events found : {len(events)}{RS}\n")
+
+    # ── Root Cause Summary ─────────────────────────────────────────────────────
+    print(f"{BD}{DM}{'─'*W72}{RS}")
+    print(f" {BD}🔎  ROOT CAUSE SUMMARY{RS}")
+    print(f"{BD}{DM}{'─'*W72}{RS}")
+    if incidents:
+        for inc in incidents:
+            col   = R if inc["severity"] == "CRITICAL" else Y
+            ts_s  = inc["ts"].strftime("%H:%M UTC")
+            print(f"\n  {col}{BD}{inc['type']:<22}{RS}  "
+                  f"{C}{inc['ns']}{RS}  {DM}[{ts_s}  {_age(inc['ts'])} ago]{RS}")
+            for ln in _wrap(inc["msg"], 68, "  " + " " * 24):
+                print(f"{DM}{ln}{RS}")
+            rec = _REC.get(inc["type"])
+            if rec:
+                print(f"\n  {'':24}{Y}⚡ Immediate:{RS} "
+                      f"{DM}{rec['immediate'][:160]}{RS}")
+                print(f"  {'':24}{G}🛡  Prevent: {RS} "
+                      f"{DM}{rec['prevent'][:160]}{RS}")
+        print()
+    else:
+        print(f"  {G}No known incident patterns detected in the last {SCALING_HISTORY_H}h.{RS}\n")
+
+    # ── Event list helper ──────────────────────────────────────────────────────
+    COL_TS  = 24   # "[YYYY-MM-DD HH:MM:SS UTC]"
+    COL_AGE = 9    # "(99m ago)"
+    COL_SEV = 9    # "CRITICAL "
+    COL_RSN = 28   # reason
+
+    def _print_event_list(ev_list: List[Dict], header: str, hdr_color: str):
+        print(f"\n{BD}{hdr_color}{'─'*W72}")
+        print(f" {header}  ({len(ev_list)} events){RS}")
+        print(f"{BD}{hdr_color}{'─'*W72}{RS}")
+        if not ev_list:
+            print(f"  {DM}(none){RS}\n")
+            return
+        for ev in ev_list:
+            sev, col = _REASON_SEV.get(ev["reason"], ("NORMAL", DM))
+            if sev in ("CRITICAL", "WARNING"):
+                sev_s = f"{col}{BD}{sev:<8}{RS}"
+            else:
+                sev_s = f"{DM}{'':8}{RS}"
+            reason_s  = f"{col}{BD}{ev['reason']:<28}{RS}"
+            count_s   = f" (×{ev['count']})" if ev["count"] > 1 else ""
+            obj_s     = f"{C}{ev['ns']}/{ev['obj']}{RS}"
+            ts_s      = f"{DM}[{ev['ts_str']}]  ({ev['age']:>5} ago){RS}"
+
+            print(f"  {ts_s}")
+            print(f"  {sev_s}  {reason_s}  {obj_s}")
+            # Word-wrap the message
+            msg = (ev["message"] + count_s)
+            for ln in _wrap(msg, 66, "  " + " " * 10):
+                print(f"{DM}{ln}{RS}")
+            print()
+
+    hist = [e for e in events if e["ts"] <  recent_cutoff]
+    curr = [e for e in events if e["ts"] >= recent_cutoff]
+
+    _print_event_list(
+        hist,
+        f"PART 1 — HISTORICAL EVENTS  (older than {SCALING_RECENT_MINS} min)",
+        DM,
+    )
+    _print_event_list(
+        curr,
+        f"PART 2 — CURRENT EVENTS  (last {SCALING_RECENT_MINS} min)",
+        Y,
+    )
+
+    # ── HPA Current Status ─────────────────────────────────────────────────────
+    if hpa_statuses:
+        print(f"{BD}{C}{'─'*W72}")
+        print(f" HPA CURRENT STATUS{RS}")
+        print(f"{BD}{C}{'─'*W72}{RS}")
+        for h in hpa_statuses:
+            ok_s = f"{G}✅ metrics OK{RS}" if h["metrics_ok"] else f"{Y}⚠  metrics UNAVAILABLE{RS}"
+            print(f"\n  {BD}{h['ns']}/{h['name']}{RS}  "
+                  f"{DM}current:{h['current']}  desired:{h['desired']}  "
+                  f"min:{h['min']}  max:{h['max']}{RS}   {ok_s}")
+            for m in h["metrics"]:
+                print(f"    {DM}├ {m}{RS}")
+            for cnd in h["conditions"]:
+                print(f"    {Y}└ {cnd}{RS}")
+        print()
+
+    # ── Node schedulability overview ───────────────────────────────────────────
+    if node_items:
+        print(f"{BD}{B}{'─'*W72}")
+        print(f" NODES & SCHEDULABILITY{RS}")
+        print(f"{BD}{B}{'─'*W72}{RS}")
+        now_ts = _now()
+        for node in node_items:
+            nname = node.metadata.name
+            conds = {c.type: c.status for c in (node.status.conditions or [])}
+            ready = conds.get("Ready") == "True"
+            ready_s = f"{G}Ready    {RS}" if ready else f"{R}NOT READY{RS}"
+
+            taints = node.spec.taints or []
+            no_s = [t for t in taints if t.effect in ("NoSchedule", "NoExecute")]
+            pref = [t for t in taints if t.effect == "PreferNoSchedule"]
+            if no_s:
+                taint_s = (f"  {Y}[NoSchedule: "
+                           + ", ".join(f"{t.key}={t.value}" for t in no_s)
+                           + f"]{RS}")
+            elif pref:
+                taint_s = (f"  {DM}[PreferNoSchedule: "
+                           + ", ".join(f"{t.key}" for t in pref)
+                           + f"]{RS}")
+            else:
+                taint_s = ""
+
+            created = node.metadata.creation_timestamp
+            new_flag = ""
+            if created:
+                age_sec = (now_ts - created.replace(tzinfo=timezone.utc)).total_seconds()
+                if age_sec < 1800:  # joined <30 min ago
+                    new_flag = f"  {G}{BD}[RECENTLY ADDED — {int(age_sec/60)}m ago]{RS}"
+
+            alloc = node.status.allocatable or {}
+            cpu_m  = _cpu(alloc.get("cpu",    "0"))
+            mem_mi = _mem(alloc.get("memory", "0"))
+            age_s  = _age(created) if created else "?"
+
+            print(f"  {nname:<16}  {ready_s}  "
+                  f"{DM}cpu:{cpu_m:>5}m  mem:{mem_mi:>6}Mi  age:{age_s}{RS}"
+                  f"{taint_s}{new_flag}")
+        print()
+
+    print(_line("━"))
+    print(f"  {DM}Run again: python agent.py --incidents  │  "
+          f"History: SCALING_HISTORY_HOURS={SCALING_HISTORY_H}  "
+          f"Recent: SCALING_RECENT_MINUTES={SCALING_RECENT_MINS}{RS}")
+    print(_line("━"))
+    print()
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
 # ║  SLACK                                                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -1693,8 +2205,41 @@ def run_loop():
 
 if __name__ == "__main__":
     _setup_rec_metrics()   # populate sre_check_rec_info once at startup
-    start_metrics_server()
-    if "--once" in sys.argv:
-        run_once()
+
+    if "--incidents" in sys.argv:
+        # ── Scaling / incident analysis mode ──────────────────────────────────
+        # Usage:
+        #   python agent.py --incidents
+        #   SCALING_HISTORY_HOURS=12 python agent.py --incidents
+        #   kubectl exec -n sre-agent deploy/sre-agent -- python agent.py --incidents
+        #
+        # Shows a two-part report:
+        #   Part 1 — historical scaling events (older than SCALING_RECENT_MINUTES)
+        #   Part 2 — current / live events     (last SCALING_RECENT_MINUTES)
+        # Plus: auto-detected incident patterns, HPA status, node schedulability.
+        ts = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"\n[{ts}] 🔍 SRE Agent — Scaling Incident Analysis")
+        print(f"[{ts}]    History  : {SCALING_HISTORY_H}h   "
+              f"│  Recent window : {SCALING_RECENT_MINS} min")
+
+        core, apps, batch, rbac, networking = _clients()
+
+        try:
+            node_items = core.list_node(limit=100).items
+        except Exception as e:
+            print(f"[{ts}] ⚠  Could not list nodes: {e}", file=sys.stderr)
+            node_items = []
+
+        print(f"[{ts}]    Fetching scaling events …")
+        events      = fetch_scaling_events(core)
+        hpa_stats   = get_hpa_status()
+        incidents   = detect_incidents(events)
+
+        print_scaling_report(events, hpa_stats, incidents, node_items)
+
     else:
-        run_loop()
+        start_metrics_server()
+        if "--once" in sys.argv:
+            run_once()
+        else:
+            run_loop()
