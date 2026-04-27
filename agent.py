@@ -63,6 +63,8 @@ OVERCOMMIT_WARN_PCT  = int(os.getenv("OVERCOMMIT_WARN_PERCENT","120"))
 EVENTS_LOOKBACK_H    = int(os.getenv("EVENTS_LOOKBACK_HOURS", "2"))
 SCALING_RECENT_MINS  = int(os.getenv("SCALING_RECENT_MINUTES", "15"))
 SCALING_HISTORY_H    = int(os.getenv("SCALING_HISTORY_HOURS",  "6"))
+EVENTS_ACTIVE_MINS   = int(os.getenv("EVENTS_ACTIVE_MINUTES",  "5"))
+EVENTS_RECENT_MINS   = int(os.getenv("EVENTS_RECENT_MINUTES",  "30"))
 
 SKIP_NS = {
     "kube-system","cert-manager","monitoring",
@@ -901,41 +903,62 @@ def check_pods(pod_items: list) -> List[Dict]:
 
 
 def check_events(core: client.CoreV1Api) -> List[Dict]:
+    """Fetch Warning events, deduplicate, tag with time bucket and count.
+
+    Time buckets (for display in print_report):
+      ACTIVE  — last EVENTS_ACTIVE_MINS minutes  (🔴 happening right now)
+      RECENT  — last EVENTS_RECENT_MINS minutes  (🟡 just happened)
+      HISTORY — older, within EVENTS_LOOKBACK_H  (🔵 background context)
+    """
     issues  = []
-    cutoff  = _now() - timedelta(hours=EVENTS_LOOKBACK_H)
-    seen    = set()
+    now_dt  = _now()
+    cutoff  = now_dt - timedelta(hours=EVENTS_LOOKBACK_H)
+    active_cut = now_dt - timedelta(minutes=EVENTS_ACTIVE_MINS)
+    recent_cut = now_dt - timedelta(minutes=EVENTS_RECENT_MINS)
+
+    # Aggregate: (ns, obj, reason) → best representative event + summed count
+    agg: Dict[tuple, Dict] = {}
 
     try:
-        events = core.list_event_for_all_namespaces(field_selector="type=Warning", limit=300)
+        raw = core.list_event_for_all_namespaces(field_selector="type=Warning", limit=500)
     except ApiException:
         return []
 
-    sorted_events = sorted(
-        [e for e in events.items if e.last_timestamp],
-        key=lambda e: e.last_timestamp,
-        reverse=True,
-    )
-    del events
-
-    for ev in sorted_events:
+    for ev in raw.items:
         ts = ev.last_timestamp
-        if ts and ts.replace(tzinfo=timezone.utc) < cutoff:
-            break
+        if not ts:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < cutoff:
+            continue
 
-        ns     = ev.metadata.namespace or ev.involved_object.namespace or "?"
-        obj    = ev.involved_object.name or "?"
-        kind   = (ev.involved_object.kind or "").lower()
+        ns     = (ev.metadata.namespace or
+                  (ev.involved_object.namespace if ev.involved_object else None) or "?")
+        obj    = (ev.involved_object.name if ev.involved_object else None) or "?"
+        kind   = ((ev.involved_object.kind if ev.involved_object else None) or "").lower()
         reason = ev.reason or "Unknown"
-        msg    = (ev.message or "")[:180]
+        msg    = (ev.message or "")[:200]
         count  = ev.count or 1
 
         key = (ns, obj, reason)
-        if key in seen:
-            continue
-        seen.add(key)
+        if key in agg:
+            agg[key]["count"] += count
+            if ts > agg[key]["ts"]:
+                agg[key]["ts"]  = ts
+                agg[key]["msg"] = msg          # keep most recent message
+        else:
+            agg[key] = {"ns": ns, "obj": obj, "kind": kind,
+                        "reason": reason, "msg": msg, "ts": ts, "count": count}
+
+    # Sort most-recent first so ACTIVE events surface at top of their severity group
+    for ev in sorted(agg.values(), key=lambda x: x["ts"], reverse=True):
+        ns, obj, kind    = ev["ns"], ev["obj"], ev["kind"]
+        reason, msg, ts  = ev["reason"], ev["msg"], ev["ts"]
+        count            = ev["count"]
 
         resource_str = (f"{ns}/{obj}" if kind in
-                        ("pod","deployment","replicaset","node","persistentvolumeclaim")
+                        ("pod","deployment","replicaset","node","persistentvolumeclaim","")
                         else f"{ns}/{kind}/{obj}")
 
         if reason in ("Evicting","Evicted","OOMKilling","SystemOOM","FreeDiskSpaceFailed",
@@ -943,14 +966,24 @@ def check_events(core: client.CoreV1Api) -> List[Dict]:
             sev = "CRITICAL"
         elif reason in ("BackOff","Failed","FailedCreate","FailedMount","FailedScheduling",
                         "FailedKillPod","NetworkNotReady","Unhealthy","ProbeWarning",
-                        "ImageGCFailed","EvictionThresholdMet"):
+                        "ImageGCFailed","EvictionThresholdMet","FailedCreatePodSandBox",
+                        "FailedGetResourceMetric","FailedComputeMetricsReplicas"):
             sev = "WARNING"
         else:
             sev = "INFO"
 
-        count_str = f" (×{count})" if count > 1 else ""
-        issues.append(_issue(sev, f"Event:{reason}", resource_str,
-            f"{msg}{count_str}", when=ts))
+        # Time bucket — used by print_report for colour-coded display
+        if ts >= active_cut:
+            bucket = "ACTIVE"
+        elif ts >= recent_cut:
+            bucket = "RECENT"
+        else:
+            bucket = "HISTORY"
+
+        iss = _issue(sev, f"Event:{reason}", resource_str, msg, when=ts)
+        iss["event_count"]  = count
+        iss["event_bucket"] = bucket
+        issues.append(iss)
 
     return issues
 
@@ -1860,6 +1893,16 @@ def print_report(report: Dict[str, Any]):
         print(f"  {name} {status} │ {DM}{cpu:12}{RS} │ {DM}{mem:16}{RS} │ {DM}age:{nd['age']}{RS}{flags}")
 
     # ── Issues ─────────────────────────────────────────────────────────────────
+    # Sort events within each severity: ACTIVE → RECENT → HISTORY
+    _BUCKET_ORDER = {"ACTIVE": 0, "RECENT": 1, "HISTORY": 2, "": 3}
+    issues = sorted(
+        issues,
+        key=lambda x: (
+            _SEV_ORDER.get(x.get("severity", "INFO"), 3),
+            _BUCKET_ORDER.get(x.get("event_bucket", ""), 3),
+        )
+    )
+
     def _print_section(sev: str, label: str, color: str):
         filtered = [i for i in issues if i["severity"] == sev]
         if not filtered:
@@ -1868,18 +1911,33 @@ def print_report(report: Dict[str, Any]):
         print(f" {label} ({len(filtered)}){RS}")
         print(f"{BD}{color}{'─'*W72}{RS}")
         for iss in filtered:
+            is_event = iss["check"].startswith("Event:")
+
+            # Time string
             if "ts" in iss and "age" in iss:
                 time_str = f"{DM}[{iss['ts']}]  ({iss['age']} ago){RS}"
-            elif "ts" in iss:
-                time_str = f"{DM}[{iss['ts']}]{RS}"
             elif "age" in iss:
                 time_str = f"{DM}(age: {iss['age']}){RS}"
             else:
                 time_str = ""
 
+            # Bucket badge + count (events only)
+            badge = ""
+            if is_event:
+                bkt = iss.get("event_bucket", "")
+                cnt = iss.get("event_count", 1)
+                if bkt == "ACTIVE":
+                    badge = f"  {R}{BD}● ACTIVE{RS}"
+                elif bkt == "RECENT":
+                    badge = f"  {Y}● RECENT{RS}"
+                elif bkt == "HISTORY":
+                    badge = f"  {DM}· HISTORY{RS}"
+                if cnt > 1:
+                    badge += f"  {BD}×{cnt}{RS}"
+
             check_col = f"{BD}{color}{iss['check']:<28}{RS}"
             res_col   = f"{C}{iss['resource']}{RS}"
-            print(f"  {check_col} {res_col}")
+            print(f"  {check_col} {res_col}{badge}")
             if time_str:
                 print(f"  {'':28} {time_str}")
             print(f"  {DM}{'':28}{RS} {iss['message']}")
@@ -2084,6 +2142,242 @@ def print_scaling_report(events: List[Dict], hpa_statuses: List[Dict],
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
+# ║  EVENT TIMELINE  (--events mode)                                  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def fetch_all_events(core: client.CoreV1Api,
+                     lookback_h: int = None,
+                     namespace_filter: Optional[str] = None) -> List[Dict]:
+    """Fetch and aggregate ALL events (Warning + Normal) for the timeline view.
+
+    Aggregates by (ns, obj, reason): sums counts, keeps min(first_ts)/max(last_ts).
+    Skips system namespaces unless explicitly filtered in.
+    Returns a list sorted by last_ts descending (most recent first).
+
+    Each entry:
+        ns, obj, kind, reason, ev_type, message,
+        first_ts, last_ts, last_ts_str, last_age,
+        count, duration_str, bucket
+    """
+    if lookback_h is None:
+        lookback_h = SCALING_HISTORY_H
+
+    now_dt     = _now()
+    cutoff     = now_dt - timedelta(hours=lookback_h)
+    active_cut = now_dt - timedelta(minutes=EVENTS_ACTIVE_MINS)
+    recent_cut = now_dt - timedelta(minutes=EVENTS_RECENT_MINS)
+
+    # (ns, obj, reason) → aggregated entry
+    agg: Dict[tuple, Dict] = {}
+
+    for ev_type in ("Warning", "Normal"):
+        try:
+            resp = core.list_event_for_all_namespaces(
+                field_selector=f"type={ev_type}", limit=600)
+        except ApiException:
+            continue
+
+        for ev in resp.items:
+            last_ts = ev.last_timestamp or ev.first_timestamp or ev.metadata.creation_timestamp
+            if not last_ts:
+                continue
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            if last_ts < cutoff:
+                continue
+
+            ns = (ev.metadata.namespace
+                  or (ev.involved_object.namespace if ev.involved_object else None)
+                  or "?")
+
+            # Namespace filter: if specified, skip others; otherwise skip system NS
+            if namespace_filter:
+                if ns != namespace_filter:
+                    continue
+            else:
+                if ns in SKIP_NS:
+                    continue
+
+            obj    = (ev.involved_object.name    if ev.involved_object else None) or "?"
+            kind   = (ev.involved_object.kind    if ev.involved_object else None) or ""
+            reason = ev.reason or "Unknown"
+            msg    = (ev.message or "")[:250]
+            count  = ev.count or 1
+
+            first_ts = ev.first_timestamp or last_ts
+            if first_ts.tzinfo is None:
+                first_ts = first_ts.replace(tzinfo=timezone.utc)
+
+            key = (ns, obj, reason)
+            if key in agg:
+                agg[key]["count"] += count
+                if last_ts > agg[key]["last_ts"]:
+                    agg[key]["last_ts"] = last_ts
+                    agg[key]["message"] = msg
+                if first_ts < agg[key]["first_ts"]:
+                    agg[key]["first_ts"] = first_ts
+            else:
+                agg[key] = {
+                    "ns":       ns,      "obj":      obj,
+                    "kind":     kind,    "reason":   reason,
+                    "ev_type":  ev_type, "message":  msg,
+                    "first_ts": first_ts,"last_ts":  last_ts,
+                    "count":    count,
+                }
+
+    results = []
+    for ev in agg.values():
+        last_ts  = ev["last_ts"]
+        first_ts = ev["first_ts"]
+        dur_sec  = (last_ts - first_ts).total_seconds()
+        dur_min  = int(dur_sec / 60)
+
+        if last_ts >= active_cut:
+            bucket = "ACTIVE"
+        elif last_ts >= recent_cut:
+            bucket = "RECENT"
+        else:
+            bucket = "HISTORY"
+
+        ev["last_ts_str"]   = last_ts.strftime("%Y-%m-%d %H:%M:%S UTC")
+        ev["last_age"]      = _age(last_ts)
+        ev["duration_str"]  = f"over {dur_min}m" if dur_min > 1 else ""
+        ev["bucket"]        = bucket
+        results.append(ev)
+
+    results.sort(key=lambda x: x["last_ts"], reverse=True)
+    return results
+
+
+def print_events_report(events: List[Dict],
+                         namespace_filter: Optional[str] = None,
+                         lookback_h: int = None):
+    """Print the three-bucket cluster event timeline.
+
+    🔴 ACTIVE  — last EVENTS_ACTIVE_MINS min  (things happening right now)
+    🟡 RECENT  — EVENTS_ACTIVE_MINS to EVENTS_RECENT_MINS min ago
+    🔵 HISTORY — EVENTS_RECENT_MINS min to lookback_h hours ago
+
+    Within each bucket events are grouped by namespace, then sorted
+    Warning-first, most-recent first.
+    """
+    if lookback_h is None:
+        lookback_h = SCALING_HISTORY_H
+
+    now_str    = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    ns_label   = f"ns: {namespace_filter}" if namespace_filter else "all namespaces"
+    warn_total = sum(1 for e in events if e["ev_type"] == "Warning")
+    norm_total = sum(1 for e in events if e["ev_type"] == "Normal")
+
+    print()
+    print(_line("━"))
+    print(f"{BD}{W}  📋  CLUSTER EVENTS  │  {CLUSTER_NAME}  │  {now_str}{RS}")
+    print(_line("━"))
+    print(f"\n  {DM}Lookback : {lookback_h}h   │  Filter : {ns_label}   │  "
+          f"Events : {len(events)}  "
+          f"({Y}{warn_total} ⚠ Warning{RS}{DM}, {norm_total} Normal){RS}\n")
+
+    # ── Namespace summary table ────────────────────────────────────────────────
+    if not namespace_filter and events:
+        ns_stats: Dict[str, Dict] = {}
+        for ev in events:
+            ns = ev["ns"]
+            st = ns_stats.setdefault(ns, {"warn": 0, "norm": 0, "last_ts": None, "bucket": "HISTORY"})
+            if ev["ev_type"] == "Warning":
+                st["warn"] += 1
+            else:
+                st["norm"] += 1
+            if st["last_ts"] is None or ev["last_ts"] > st["last_ts"]:
+                st["last_ts"] = ev["last_ts"]
+                st["bucket"]  = ev["bucket"]
+
+        print(f"{BD}{DM}{'─'*W72}{RS}")
+        print(f" {BD}NAMESPACE SUMMARY{RS}")
+        print(f"{BD}{DM}{'─'*W72}{RS}")
+        for ns, st in sorted(ns_stats.items(),
+                              key=lambda x: (-x[1]["warn"], -(x[1]["norm"]))):
+            if st["bucket"] == "ACTIVE":
+                bkt_s = f"{R}{BD}● ACTIVE{RS}"
+            elif st["bucket"] == "RECENT":
+                bkt_s = f"{Y}● RECENT{RS}"
+            else:
+                bkt_s = f"{DM}· quiet  {RS}"
+            warn_s = f"{Y}{st['warn']:>2} ⚠ Warning{RS}" if st["warn"] else f"{DM} 0 Warning{RS}"
+            norm_s = f"{DM}{st['norm']:>2} Normal{RS}"
+            age_s  = f"last event: {_age(st['last_ts'])}" if st["last_ts"] else ""
+            print(f"  {ns:<22}  {bkt_s}  {warn_s}  {norm_s}  {DM}{age_s}{RS}")
+        print()
+
+    # ── Bucket printer ─────────────────────────────────────────────────────────
+    def _print_bucket(bucket_name: str, icon: str, hdr_col: str,
+                       time_desc: str, ev_list: List[Dict]):
+        print(f"{BD}{hdr_col}{'━'*W72}")
+        print(f" {icon}  {bucket_name}  —  {time_desc}  ({len(ev_list)} events){RS}")
+        print(f"{BD}{hdr_col}{'━'*W72}{RS}")
+
+        if not ev_list:
+            print(f"\n  {G}✓ Nothing here — all quiet.{RS}\n")
+            return
+
+        # Group by namespace, warnings first
+        by_ns: Dict[str, List[Dict]] = {}
+        for ev in ev_list:
+            by_ns.setdefault(ev["ns"], []).append(ev)
+
+        for ns, ns_evs in sorted(by_ns.items(),
+                                  key=lambda x: -sum(1 for e in x[1] if e["ev_type"]=="Warning")):
+            ns_warn = sum(1 for e in ns_evs if e["ev_type"] == "Warning")
+            ns_icon = f"{Y}⚠{RS}" if ns_warn else f"{DM}·{RS}"
+            if len(by_ns) > 1:
+                print(f"\n  {ns_icon} {BD}{C}{ns}{RS}  "
+                      f"{DM}({ns_warn} Warning, {len(ns_evs)-ns_warn} Normal){RS}")
+
+            # Sort: warnings first, then most-recent first
+            sorted_evs = sorted(
+                ns_evs,
+                key=lambda e: (0 if e["ev_type"] == "Warning" else 1, -e["last_ts"].timestamp())
+            )
+
+            for ev in sorted_evs:
+                is_warn  = ev["ev_type"] == "Warning"
+                col      = Y if is_warn else DM
+                type_ico = f"{Y}⚠{RS}" if is_warn else f"{DM}·{RS}"
+                cnt_s    = f"  {BD}×{ev['count']}{RS}" if ev["count"] > 1 else ""
+                dur_s    = f"  {DM}{ev['duration_str']}{RS}" if ev["duration_str"] else ""
+
+                print(f"\n    {DM}[{ev['last_ts_str']}]  ({ev['last_age']:>5} ago){RS}"
+                      f"{cnt_s}{dur_s}")
+                print(f"    {type_ico} {col}{BD}{ev['reason']:<28}{RS}  "
+                      f"{W}{ev['obj']}{RS}  {DM}({ev['kind'].lower() or 'object'}){RS}")
+                # Word-wrap message
+                for ln in _wrap(ev["message"], 64, "      "):
+                    print(f"{DM}{ln}{RS}")
+        print()
+
+    active_evs  = [e for e in events if e["bucket"] == "ACTIVE"]
+    recent_evs  = [e for e in events if e["bucket"] == "RECENT"]
+    history_evs = [e for e in events if e["bucket"] == "HISTORY"]
+
+    _print_bucket("ACTIVE",  "🔴", R,
+                  f"last {EVENTS_ACTIVE_MINS} min — things happening RIGHT NOW",
+                  active_evs)
+    _print_bucket("RECENT",  "🟡", Y,
+                  f"{EVENTS_ACTIVE_MINS}–{EVENTS_RECENT_MINS} min ago",
+                  recent_evs)
+    _print_bucket("HISTORY", "🔵", DM,
+                  f"{EVENTS_RECENT_MINS} min – {lookback_h}h ago",
+                  history_evs)
+
+    print(_line("━"))
+    print(f"  {DM}Flags: --events [--ns <namespace>]  │  "
+          f"EVENTS_ACTIVE_MINUTES={EVENTS_ACTIVE_MINS}  "
+          f"EVENTS_RECENT_MINUTES={EVENTS_RECENT_MINS}  "
+          f"SCALING_HISTORY_HOURS={lookback_h}{RS}")
+    print(_line("━"))
+    print()
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
 # ║  SLACK                                                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -2206,7 +2500,46 @@ def run_loop():
 if __name__ == "__main__":
     _setup_rec_metrics()   # populate sre_check_rec_info once at startup
 
-    if "--incidents" in sys.argv:
+    # ── Parse shared flags ─────────────────────────────────────────────────────
+    # --ns <namespace>  : filter events/incidents to a single namespace
+    # --hours <N>       : override lookback window (default: SCALING_HISTORY_HOURS)
+    _ns_filter: Optional[str] = None
+    _lookback_h: int = SCALING_HISTORY_H
+    for _i, _a in enumerate(sys.argv):
+        if _a == "--ns" and _i + 1 < len(sys.argv):
+            _ns_filter = sys.argv[_i + 1]
+        elif _a.startswith("--ns="):
+            _ns_filter = _a.split("=", 1)[1]
+        elif _a == "--hours" and _i + 1 < len(sys.argv):
+            try: _lookback_h = int(sys.argv[_i + 1])
+            except ValueError: pass
+        elif _a.startswith("--hours="):
+            try: _lookback_h = int(_a.split("=", 1)[1])
+            except ValueError: pass
+
+    if "--events" in sys.argv:
+        # ── Event timeline mode ────────────────────────────────────────────────
+        # Usage:
+        #   python agent.py --events
+        #   python agent.py --events --ns rohama
+        #   python agent.py --events --ns rohama --hours 12
+        #   kubectl exec -n sre-agent deploy/sre-agent -- python agent.py --events --ns rohama
+        #
+        # Shows three time buckets:
+        #   🔴 ACTIVE  — last EVENTS_ACTIVE_MINUTES  (default 5 min)
+        #   🟡 RECENT  — last EVENTS_RECENT_MINUTES  (default 30 min)
+        #   🔵 HISTORY — up to SCALING_HISTORY_HOURS (default 6h)
+        # Events grouped by namespace, warnings first, with repeat counts.
+        ts = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        ns_msg = f"  ns={_ns_filter}" if _ns_filter else "  all namespaces"
+        print(f"\n[{ts}] 📋 SRE Agent — Event Timeline{ns_msg}  lookback={_lookback_h}h")
+
+        core, *_ = _clients()
+        events   = fetch_all_events(core, lookback_h=_lookback_h,
+                                     namespace_filter=_ns_filter)
+        print_events_report(events, namespace_filter=_ns_filter, lookback_h=_lookback_h)
+
+    elif "--incidents" in sys.argv:
         # ── Scaling / incident analysis mode ──────────────────────────────────
         # Usage:
         #   python agent.py --incidents
