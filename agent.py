@@ -581,13 +581,19 @@ if PROMETHEUS_ENABLED:
 
     # ── Event-timeline metrics (mirrors --events CLI output) ─────────────────
     # sre_namespace_events{namespace, bucket}  — total warning events per ns+bucket
-    # sre_event_by_reason{namespace, reason, bucket} — per-reason breakdown
+    # sre_event_by_reason{namespace, reason, bucket} — per-reason aggregated count
+    # sre_event_detail{namespace,reason,object,kind,message,bucket} — per-event row
+    #   with full detail labels; used as the main Grafana events table source
     _g_ns_events = Gauge('sre_namespace_events',
                          'Warning events per namespace and time bucket (ACTIVE/RECENT/HISTORY)',
                          ['namespace', 'bucket'])
     _g_reason_events = Gauge('sre_event_by_reason',
                               'Warning events per namespace, reason, and time bucket',
                               ['namespace', 'reason', 'bucket'])
+    _g_event_detail = Gauge('sre_event_detail',
+                             'Full detail for each deduplicated warning event — '
+                             'object, kind, truncated message, bucket, count',
+                             ['namespace', 'reason', 'object', 'kind', 'message', 'bucket'])
 
     def _setup_rec_metrics():
         """Populate sre_check_rec_info once at process startup — static, never changes."""
@@ -604,10 +610,12 @@ if PROMETHEUS_ENABLED:
     _seen_check_labels: Set[Tuple[str, str]] = set()
     _seen_ns_event_labels: Set[Tuple[str, str]] = set()
     _seen_reason_event_labels: Set[Tuple[str, str, str]] = set()
+    _seen_event_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
 
     def update_metrics(report: Dict[str, Any], duration: float) -> None:
         """Update all Prometheus metrics from the latest report."""
-        global _prev_issue_keys, _seen_check_labels, _seen_ns_event_labels, _seen_reason_event_labels
+        global _prev_issue_keys, _seen_check_labels, \
+               _seen_ns_event_labels, _seen_reason_event_labels, _seen_event_detail_labels
 
         s = report["summary"]
         _g_critical.set(s["critical"])
@@ -658,19 +666,30 @@ if PROMETHEUS_ENABLED:
         # Aggregate counts from event issues (check starts with "Event:")
         ns_bucket: Dict[Tuple[str, str], int] = {}
         reason_bucket: Dict[Tuple[str, str, str], int] = {}
+        # detail key: (ns, reason, object, kind, message_truncated, bucket)
+        detail_bucket: Dict[Tuple[str, str, str, str, str, str], int] = {}
+
         for iss in report["issues"]:
             if not iss["check"].startswith("Event:"):
                 continue
-            # resource is "namespace/object" or just "object"
+            # resource is "namespace/object", "namespace/kind/object", or just "object"
             resource = iss.get("resource", "")
-            ns = resource.split("/")[0] if "/" in resource else resource
-            bucket = iss.get("event_bucket", "HISTORY")
+            parts = resource.split("/")
+            ns     = parts[0] if len(parts) >= 2 else resource
             reason = iss["check"][len("Event:"):]
+            bucket = iss.get("event_bucket", "HISTORY")
             count  = iss.get("event_count", 1)
+            obj    = iss.get("event_object", parts[-1] if parts else "?")
+            kind   = iss.get("event_kind", "")
+            # Truncate message to 150 chars — keep Prometheus label cardinality bounded
+            msg    = (iss.get("message", ""))[:150]
+
             ns_bucket[(ns, bucket)]            = ns_bucket.get((ns, bucket), 0) + count
             reason_bucket[(ns, reason, bucket)] = reason_bucket.get((ns, reason, bucket), 0) + count
+            dk = (ns, reason, obj, kind, msg, bucket)
+            detail_bucket[dk]                  = detail_bucket.get(dk, 0) + count
 
-        # Set new values first to avoid zero-window during Prometheus scrape
+        # Set new values FIRST — no zero-window during Prometheus scrape
         new_ns_labels: Set[Tuple[str, str]] = set()
         for (ns, bucket), cnt in ns_bucket.items():
             _g_ns_events.labels(namespace=ns, bucket=bucket).set(cnt)
@@ -681,14 +700,28 @@ if PROMETHEUS_ENABLED:
             _g_reason_events.labels(namespace=ns, reason=reason, bucket=bucket).set(cnt)
             new_reason_labels.add((ns, reason, bucket))
 
+        new_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
+        for (ns, reason, obj, kind, msg, bucket), cnt in detail_bucket.items():
+            _g_event_detail.labels(
+                namespace=ns, reason=reason, object=obj,
+                kind=kind, message=msg, bucket=bucket
+            ).set(cnt)
+            new_detail_labels.add((ns, reason, obj, kind, msg, bucket))
+
         # Zero-out labels that are no longer active this cycle
         for ns, bucket in _seen_ns_event_labels - new_ns_labels:
             _g_ns_events.labels(namespace=ns, bucket=bucket).set(0)
         for ns, reason, bucket in _seen_reason_event_labels - new_reason_labels:
             _g_reason_events.labels(namespace=ns, reason=reason, bucket=bucket).set(0)
+        for ns, reason, obj, kind, msg, bucket in _seen_event_detail_labels - new_detail_labels:
+            _g_event_detail.labels(
+                namespace=ns, reason=reason, object=obj,
+                kind=kind, message=msg, bucket=bucket
+            ).set(0)
 
-        _seen_ns_event_labels    = new_ns_labels
+        _seen_ns_event_labels     = new_ns_labels
         _seen_reason_event_labels = new_reason_labels
+        _seen_event_detail_labels = new_detail_labels
 
     def _noop_setup():
         pass
@@ -1031,6 +1064,8 @@ def check_events(core: client.CoreV1Api) -> List[Dict]:
         iss = _issue(sev, f"Event:{reason}", resource_str, msg, when=ts)
         iss["event_count"]  = count
         iss["event_bucket"] = bucket
+        iss["event_object"] = obj
+        iss["event_kind"]   = kind
         issues.append(iss)
 
     return issues
