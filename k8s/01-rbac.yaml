@@ -24,6 +24,7 @@ rules:
       - namespaces
       - persistentvolumeclaims
       - events
+      - configmaps        # Odoo config check: reads odoo.conf ConfigMaps
     verbs: ["get", "list"]
   # Apps resources
   - apiGroups: ["apps"]
@@ -63,6 +64,11 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources:
       - networkpolicies
+    verbs: ["get", "list"]
+  # HPA (for Odoo HPA alignment checks)
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
     verbs: ["get", "list"]
 ---
 # ClusterRoleBinding — bind the role to the agent ServiceAccount

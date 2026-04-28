@@ -535,6 +535,154 @@ _REC: Dict[str, Dict[str, str]] = {
                       "Set HPA scaleUp triggers at lower CPU% (e.g. 60%) so scale-up starts earlier. "
                       "Use OKE virtual nodes (serverless) for near-instant capacity if available in your region.",
     },
+
+    # ── Odoo Ladder-of-Limits checks ─────────────────────────────────────────
+    # Reference:  hard = 80% of K8s limit   soft = 80% of K8s request
+    #             HPA memory target = 80% of request   workers = 2 × CPU cores
+
+    "OdooHardExceedsK8sLimit": {
+        "root_cause": "limit_memory_hard > K8s memory limit. The Linux OOM killer evicts the pod "
+                      "before Odoo can gracefully restart the worker. This causes hard pod crashes "
+                      "instead of clean worker recycling and is the #1 cause of unexpected OOMKills.",
+        "immediate":  "Lower limit_memory_hard to ≤ 80% of K8s limit "
+                      "(formula: K8s_limit_GiB × 0.80 × 1,073,741,824 bytes). "
+                      "Alternatively raise the K8s memory limit, then redeploy.",
+        "prevent":    "Follow the Ladder of Limits: hard = 80% of K8s limit, soft = 80% of K8s request. "
+                      "Encode these ratios in your Helm values so they stay in sync automatically.",
+    },
+    "OdooHardTooCloseToLimit": {
+        "root_cause": "limit_memory_hard > 90% of K8s limit. Less than 10% headroom between the Odoo "
+                      "worker kill threshold and the K8s OOM eviction wall. Any transient memory spike "
+                      "(e.g. a large report) kills the pod instead of restarting the worker.",
+        "immediate":  "Reduce limit_memory_hard to ≤ 85% of K8s limit to restore a safe buffer.",
+        "prevent":    "Target hard = 80% of K8s limit. Keep at least 15–20% headroom "
+                      "for the Odoo process overhead beyond the worker heap.",
+    },
+    "OdooHardRatioLow": {
+        "root_cause": "limit_memory_hard < 70% of K8s limit. Workers are being killed and restarted "
+                      "well below the guaranteed K8s memory allocation — wasting up to 30% of reserved "
+                      "memory and causing excessive worker churn.",
+        "immediate":  "Raise limit_memory_hard toward 80% of K8s limit "
+                      "(formula: K8s_limit_GiB × 0.80 × 1,073,741,824 bytes).",
+        "prevent":    "Revisit memory sizing holistically: K8s request = expected working set, "
+                      "K8s limit = peak allowance, hard = 80% of limit.",
+    },
+    "OdooSoftExceedsHard": {
+        "root_cause": "limit_memory_soft ≥ limit_memory_hard. The Ladder of Limits is inverted: "
+                      "Odoo will never trigger a graceful worker restart (soft) because the hard kill "
+                      "threshold is reached first. Every worker termination is abrupt.",
+        "immediate":  "Correct the order: set soft < hard. "
+                      "Recommended: soft = 80% of K8s request, hard = 80% of K8s limit.",
+        "prevent":    "Validate both values together whenever either is changed. "
+                      "Add a CI check: assert limit_memory_soft < limit_memory_hard.",
+    },
+    "OdooSoftExceedsRequest": {
+        "root_cause": "limit_memory_soft > K8s memory request. Workers restart when memory exceeds "
+                      "the guaranteed K8s allocation, but at that point the node scheduler may have "
+                      "already over-committed the node, making the pod vulnerable to eviction during restart.",
+        "immediate":  "Lower limit_memory_soft to ≤ K8s request (recommended: 80% of request).",
+        "prevent":    "Set soft = 80% of K8s request. This ensures graceful restarts happen within "
+                      "the guaranteed allocation window, before any node pressure builds.",
+    },
+    "OdooSoftRatioLow": {
+        "root_cause": "limit_memory_soft < 60% of K8s request. Workers restart excessively — "
+                      "for a 2.5 GiB request this means restarting at ~1.5 GiB, wasting 1 GiB of reserved memory "
+                      "and causing high worker churn that degrades request throughput.",
+        "immediate":  "Raise limit_memory_soft toward 80% of K8s request.",
+        "prevent":    "Target soft = 80% of K8s request. Tune upward if workers still restart too frequently.",
+    },
+    "WorkersMissing": {
+        "root_cause": "workers = 0 means Odoo is running in single-process (threaded) mode. "
+                      "There are no separate worker processes — one slow or blocked request delays all others. "
+                      "Memory limits and OOM kills are also less predictable in this mode.",
+        "immediate":  "Set workers = 2 in odoo.conf (or = 1 for 0.5 CPU deployments). "
+                      "Restart the pod to apply: kubectl rollout restart deployment/<name>",
+        "prevent":    "Always set workers ≥ 1 for production. 2 workers per CPU core is the standard rule.",
+    },
+    "WorkerCountMismatch": {
+        "root_cause": "The number of Odoo workers does not match the CPU request. "
+                      "Too many workers → context-switch overhead, higher memory pressure, slower individual requests. "
+                      "Too few workers → CPU cores idle, low concurrency, wasted node resources.",
+        "immediate":  "Set workers = floor(cpu_request × 2). "
+                      "For 0.5 CPU → workers=1, for 1 CPU → workers=2, for 2 CPU → workers=4.",
+        "prevent":    "Keep workers = 2 × cpu_request as the standard ratio. "
+                      "Change workers and cpu_request together in the same deployment update.",
+    },
+    "HpaNotFound": {
+        "root_cause": "No HorizontalPodAutoscaler exists for this Odoo deployment. "
+                      "A single pod handles all traffic — no scale-out on load spikes, "
+                      "and any OOMKill leaves the service with zero replicas during restart.",
+        "immediate":  "Create an HPA targeting memory=80% and cpu=75%: "
+                      "kubectl apply -f hpa.yaml (see QUICK_REFERENCE for the full spec).",
+        "prevent":    "Include HPA in your standard deployment template. "
+                      "minReplicas=1, maxReplicas=5, memory=80%, cpu=75%, "
+                      "scaleDown.stabilizationWindowSeconds=300.",
+    },
+    "HpaMemoryMisaligned": {
+        "root_cause": "The HPA memory trigger point (averageUtilization% × K8s request) does not match "
+                      "limit_memory_soft. The HPA should scale out exactly when memory approaches the soft limit — "
+                      "triggering too early wastes pods, triggering too late means workers die before help arrives.",
+        "immediate":  "Set HPA memory averageUtilization = round(limit_memory_soft / k8s_request × 100). "
+                      "For soft=2.0GiB and request=2.5GiB: averageUtilization=80.",
+        "prevent":    "Always derive HPA memory target from the soft/request ratio. "
+                      "When you change request or soft, recalculate and update the HPA.",
+    },
+    "HpaMaxTooLow": {
+        "root_cause": "HPA maxReplicas < 3. Very limited scaling headroom — a load spike that requires "
+                      "more than 2 replicas will cause sustained degradation with no further scale-out.",
+        "immediate":  "Raise maxReplicas to at least 3 (recommended: 5). "
+                      "kubectl patch hpa <name> -n <ns> -p '{\"spec\":{\"maxReplicas\":5}}'",
+        "prevent":    "Set maxReplicas based on node capacity. Default recommendation: 5. "
+                      "Review and increase during traffic growth.",
+    },
+    "HpaCpuTargetHigh": {
+        "root_cause": "HPA CPU averageUtilization target > 85%. Pods run near 100% CPU before "
+                      "scale-out is triggered — during the 1–2 min provisioning window "
+                      "request latency degrades significantly.",
+        "immediate":  "Lower cpu averageUtilization to 75% for faster, earlier scale-out.",
+        "prevent":    "Target 70–75% CPU utilization to give a comfortable buffer before saturation.",
+    },
+    "HpaScaleDownFast": {
+        "root_cause": "HPA scaleDown stabilizationWindowSeconds < 120. Scale-down happens too quickly "
+                      "after load drops, causing thrashing: new pods start → scale-up → scale-down → "
+                      "load returns → scale-up again in a rapid cycle.",
+        "immediate":  "Set scaleDown.stabilizationWindowSeconds ≥ 300 (5 minutes).",
+        "prevent":    "Use 300s as the default. Only reduce for batch/queue workloads where "
+                      "rapid scale-down is desired.",
+    },
+    "LimitRequestTooLow": {
+        "root_cause": "limit_request < 4096. Odoo workers restart after fewer than 4096 HTTP requests — "
+                      "very high worker churn rate, warm-up overhead on every restart, "
+                      "and more frequent transient errors during recycling.",
+        "immediate":  "Set limit_request = 8192 in odoo.conf (standard value for production).",
+        "prevent":    "Use 8192 as default. Increase to 16384 if workers still restart too frequently "
+                      "and memory growth is stable.",
+    },
+    "LimitTimeMissing": {
+        "root_cause": "limit_time_cpu or limit_time_real is 0 (unlimited). A runaway request "
+                      "(e.g. a slow report, infinite loop in custom code) can lock up a worker indefinitely, "
+                      "gradually exhausting the worker pool.",
+        "immediate":  "Set limit_time_cpu = 600 (10 min) and limit_time_real = 1200 (20 min).",
+        "prevent":    "Always set both. Increase only for known long-running operations "
+                      "(scheduled actions run in separate cron workers and are not affected).",
+    },
+    "LogfileEnabled": {
+        "root_cause": "logfile is set to a file path instead of False. In Kubernetes, containers "
+                      "should write logs to stdout/stderr so kubelet/fluentd can collect them. "
+                      "Writing to a file inside the container: (1) fills ephemeral storage, "
+                      "(2) requires log rotation config, (3) is invisible to kubectl logs.",
+        "immediate":  "Set logfile = False in odoo.conf and restart the pod.",
+        "prevent":    "Always use logfile = False for K8s deployments. "
+                      "Ship logs via stdout → fluentd/Loki → Grafana.",
+    },
+    "OdooConfigNotFound": {
+        "root_cause": "The SRE agent could not locate an odoo.conf ConfigMap for this Odoo deployment. "
+                      "Ladder-of-Limits compliance cannot be verified without reading the configuration.",
+        "immediate":  "Ensure a ConfigMap with odoo.conf data is mounted into the Odoo pod "
+                      "(either via volume or envFrom), or that it is in the same namespace as the deployment.",
+        "prevent":    "Standardize ConfigMap naming: use 'odoo-config' or include 'odoo' and 'conf' "
+                      "in the name so the SRE agent can auto-discover it.",
+    },
 }
 
 
@@ -580,20 +728,24 @@ if PROMETHEUS_ENABLED:
                         ['check', 'root_cause', 'immediate', 'prevent'])
 
     # ── Event-timeline metrics (mirrors --events CLI output) ─────────────────
-    # sre_namespace_events{namespace, bucket}  — total warning events per ns+bucket
-    # sre_event_by_reason{namespace, reason, bucket} — per-reason aggregated count
-    # sre_event_detail{namespace,reason,object,kind,message,bucket} — per-event row
-    #   with full detail labels; used as the main Grafana events table source
+    # IMPORTANT: use k8s_namespace (not namespace) to avoid collision with the
+    # Prometheus Kubernetes SD label namespace=<scrape-target-ns>.  If both exist,
+    # Prometheus keeps the SD label as "namespace" and renames the metric label to
+    # "exported_namespace", breaking all Grafana queries.  k8s_namespace is safe.
+    #
+    # sre_namespace_events{k8s_namespace, bucket}
+    # sre_event_by_reason{k8s_namespace, reason, bucket}
+    # sre_event_detail{k8s_namespace,reason,object,kind,message,bucket}
     _g_ns_events = Gauge('sre_namespace_events',
                          'Warning events per namespace and time bucket (ACTIVE/RECENT/HISTORY)',
-                         ['namespace', 'bucket'])
+                         ['k8s_namespace', 'bucket'])
     _g_reason_events = Gauge('sre_event_by_reason',
                               'Warning events per namespace, reason, and time bucket',
-                              ['namespace', 'reason', 'bucket'])
+                              ['k8s_namespace', 'reason', 'bucket'])
     _g_event_detail = Gauge('sre_event_detail',
                              'Full detail for each deduplicated warning event — '
                              'object, kind, truncated message, bucket, count',
-                             ['namespace', 'reason', 'object', 'kind', 'message', 'bucket'])
+                             ['k8s_namespace', 'reason', 'object', 'kind', 'message', 'bucket'])
 
     def _setup_rec_metrics():
         """Populate sre_check_rec_info once at process startup — static, never changes."""
@@ -692,30 +844,30 @@ if PROMETHEUS_ENABLED:
         # Set new values FIRST — no zero-window during Prometheus scrape
         new_ns_labels: Set[Tuple[str, str]] = set()
         for (ns, bucket), cnt in ns_bucket.items():
-            _g_ns_events.labels(namespace=ns, bucket=bucket).set(cnt)
+            _g_ns_events.labels(k8s_namespace=ns, bucket=bucket).set(cnt)
             new_ns_labels.add((ns, bucket))
 
         new_reason_labels: Set[Tuple[str, str, str]] = set()
         for (ns, reason, bucket), cnt in reason_bucket.items():
-            _g_reason_events.labels(namespace=ns, reason=reason, bucket=bucket).set(cnt)
+            _g_reason_events.labels(k8s_namespace=ns, reason=reason, bucket=bucket).set(cnt)
             new_reason_labels.add((ns, reason, bucket))
 
         new_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
         for (ns, reason, obj, kind, msg, bucket), cnt in detail_bucket.items():
             _g_event_detail.labels(
-                namespace=ns, reason=reason, object=obj,
+                k8s_namespace=ns, reason=reason, object=obj,
                 kind=kind, message=msg, bucket=bucket
             ).set(cnt)
             new_detail_labels.add((ns, reason, obj, kind, msg, bucket))
 
         # Zero-out labels that are no longer active this cycle
         for ns, bucket in _seen_ns_event_labels - new_ns_labels:
-            _g_ns_events.labels(namespace=ns, bucket=bucket).set(0)
+            _g_ns_events.labels(k8s_namespace=ns, bucket=bucket).set(0)
         for ns, reason, bucket in _seen_reason_event_labels - new_reason_labels:
-            _g_reason_events.labels(namespace=ns, reason=reason, bucket=bucket).set(0)
+            _g_reason_events.labels(k8s_namespace=ns, reason=reason, bucket=bucket).set(0)
         for ns, reason, obj, kind, msg, bucket in _seen_event_detail_labels - new_detail_labels:
             _g_event_detail.labels(
-                namespace=ns, reason=reason, object=obj,
+                k8s_namespace=ns, reason=reason, object=obj,
                 kind=kind, message=msg, bucket=bucket
             ).set(0)
 
@@ -808,7 +960,138 @@ def _clients() -> Tuple:
         client.BatchV1Api(),
         client.RbacAuthorizationV1Api(),
         client.NetworkingV1Api(),
+        client.AutoscalingV2Api(),   # for Odoo HPA checks
     )
+
+
+# ── Odoo config helpers ───────────────────────────────────────────────────────
+
+def _parse_k8s_mem(s: str) -> int:
+    """Parse K8s memory string to bytes.  '2.5Gi' → 2684354560, '512Mi' → 536870912"""
+    if not s:
+        return 0
+    s = s.strip()
+    for suffix, mult in [("Ki", 1024), ("Mi", 1024**2), ("Gi", 1024**3), ("Ti", 1024**4),
+                         ("K",  1000), ("M",  1000**2),  ("G",  1000**3),  ("T",  1000**4)]:
+        if s.endswith(suffix):
+            try:
+                return int(float(s[:-len(suffix)]) * mult)
+            except ValueError:
+                return 0
+    try:
+        return int(s)
+    except ValueError:
+        return 0
+
+
+def _parse_k8s_cpu(s: str) -> float:
+    """Parse K8s CPU string to cores.  '500m' → 0.5,  '2' → 2.0"""
+    if not s:
+        return 0.0
+    s = s.strip()
+    if s.endswith("m"):
+        try:
+            return int(s[:-1]) / 1000.0
+        except ValueError:
+            return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _gib(b: int) -> str:
+    """Format bytes as 'X.XGiB' for display."""
+    return f"{b / (1024**3):.2f} GiB"
+
+
+def _parse_odoo_conf(text: str) -> Dict[str, str]:
+    """Parse odoo.conf ini-style text into a lowercase key→value dict.
+
+    Handles [section] headers, comments (#, ;), and bare key = value lines.
+    """
+    result: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(";") or line.startswith("["):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            result[key.strip().lower()] = val.strip()
+    return result
+
+
+def _find_odoo_configmaps(core: client.CoreV1Api, ns: str,
+                           dep) -> List[Dict[str, str]]:
+    """Return a list of parsed odoo.conf dicts found in ConfigMaps for this namespace.
+
+    Search strategy (in order):
+      1. ConfigMaps referenced in the deployment's envFrom / volumes
+      2. All ConfigMaps in the namespace whose data contains Odoo config keys
+    """
+    _ODOO_KEYS = {"limit_memory_hard", "limit_memory_soft", "workers", "limit_time_cpu"}
+    found: List[Dict[str, str]] = []
+    seen_names: set = set()
+
+    def _try_cm(name: str) -> None:
+        if name in seen_names:
+            return
+        seen_names.add(name)
+        try:
+            cm = core.read_namespaced_config_map(name, ns)
+        except ApiException:
+            return
+        for val in (cm.data or {}).values():
+            parsed = _parse_odoo_conf(val)
+            if _ODOO_KEYS & set(parsed):
+                found.append(parsed)
+                return
+
+    # 1. From deployment spec
+    try:
+        for container in (dep.spec.template.spec.containers or []):
+            for ef in (container.env_from or []):
+                if ef.config_map_ref:
+                    _try_cm(ef.config_map_ref.name)
+        for vol in (dep.spec.template.spec.volumes or []):
+            if vol.config_map:
+                _try_cm(vol.config_map.name)
+    except (AttributeError, TypeError):
+        pass
+
+    if found:
+        return found
+
+    # 2. Scan all ConfigMaps in the namespace
+    try:
+        cms = core.list_namespaced_config_map(ns, limit=100)
+        for cm in cms.items:
+            _try_cm(cm.metadata.name)
+            if found:
+                return found
+    except ApiException:
+        pass
+
+    return found
+
+
+def _is_odoo_deployment(dep) -> bool:
+    """Heuristic: is this deployment an Odoo workload?"""
+    name = (dep.metadata.name or "").lower()
+    labels = dep.metadata.labels or {}
+    label_vals = " ".join(str(v).lower() for v in labels.values())
+    # Check name, labels, or container images
+    if "odoo" in name:
+        return True
+    if "odoo" in label_vals:
+        return True
+    try:
+        for c in dep.spec.template.spec.containers:
+            if "odoo" in (c.image or "").lower():
+                return True
+    except (AttributeError, TypeError):
+        pass
+    return False
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -1844,6 +2127,250 @@ def check_nodeport_services(core) -> List[Dict]:
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
+# ║  ODOO CONFIG CHECKS  (Ladder of Limits)                          ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+def check_odoo_config(core: client.CoreV1Api,
+                      apps: client.AppsV1Api,
+                      autoscaling: client.AutoscalingV2Api) -> List[Dict]:
+    """Verify Odoo memory/worker config aligns with K8s resources and HPA settings.
+
+    Ladder of Limits:
+        Soft limit  →  HPA trigger  →  K8s Request  →  Hard limit  →  K8s Limit
+
+    Key invariants:
+        hard  = 80% of K8s limit      (Odoo kills worker before OOM eviction)
+        soft  = 80% of K8s request    (Odoo gracefully restarts within guaranteed memory)
+        HPA memory target ≈ soft / request × 100  (scale-out triggered at soft limit)
+        workers = max(1, floor(cpu_request × 2))
+    """
+    issues: List[Dict] = []
+
+    for ns in APP_NAMESPACES:
+        # ── Fetch deployments ────────────────────────────────────────────────
+        try:
+            deploys = apps.list_namespaced_deployment(ns, limit=50).items
+        except ApiException:
+            continue
+
+        odoo_deploys = [d for d in deploys if _is_odoo_deployment(d)]
+        if not odoo_deploys:
+            continue
+
+        # ── Fetch HPAs in namespace (once, keyed by target deployment name) ──
+        hpa_map: Dict[str, Any] = {}
+        try:
+            for h in autoscaling.list_namespaced_horizontal_pod_autoscaler(ns, limit=50).items:
+                ref = h.spec.scale_target_ref
+                if ref and ref.kind == "Deployment":
+                    hpa_map[ref.name] = h
+        except ApiException:
+            pass
+
+        for dep in odoo_deploys:
+            dep_name = dep.metadata.name
+            rid      = f"{ns}/{dep_name}"
+
+            # ── K8s resource limits for the first Odoo container ────────────
+            containers = (dep.spec.template.spec.containers or [])
+            container  = next(
+                (c for c in containers if "odoo" in (c.name or "").lower()),
+                containers[0] if containers else None,
+            )
+            if container is None:
+                continue
+
+            res    = container.resources or type("R", (), {"requests": {}, "limits": {}})()
+            reqs   = res.requests or {}
+            lims   = res.limits   or {}
+            k8s_req_mem = _parse_k8s_mem(reqs.get("memory", ""))
+            k8s_lim_mem = _parse_k8s_mem(lims.get("memory", ""))
+            k8s_req_cpu = _parse_k8s_cpu(reqs.get("cpu", ""))
+
+            # ── Find & parse Odoo ConfigMap ──────────────────────────────────
+            conf_list = _find_odoo_configmaps(core, ns, dep)
+            if not conf_list:
+                issues.append(_issue("INFO", "OdooConfigNotFound", rid,
+                    f"No odoo.conf ConfigMap found for deployment '{dep_name}'. "
+                    f"Ladder-of-Limits compliance cannot be verified. "
+                    f"Mount a ConfigMap containing limit_memory_hard / workers etc."))
+                continue
+
+            conf = conf_list[0]   # use first match (typically only one)
+
+            # Parse integer/float values with safe fallback
+            def _ci(key: str, default: int = 0) -> int:
+                try:
+                    return int(float(conf.get(key, default) or default))
+                except (ValueError, TypeError):
+                    return default
+
+            def _cf(key: str, default: float = 0.0) -> float:
+                try:
+                    return float(conf.get(key, default) or default)
+                except (ValueError, TypeError):
+                    return default
+
+            hard          = _ci("limit_memory_hard")
+            soft          = _ci("limit_memory_soft")
+            workers       = _ci("workers")
+            limit_request = _ci("limit_request")
+            time_cpu      = _ci("limit_time_cpu")
+            time_real     = _ci("limit_time_real")
+            logfile       = conf.get("logfile", "").strip().lower()
+
+            # ── HPA for this deployment ──────────────────────────────────────
+            hpa = hpa_map.get(dep_name)
+            hpa_mem_pct:  int = 0
+            hpa_cpu_pct:  int = 0
+            hpa_max:      int = 0
+            hpa_sd_secs:  int = 300   # default stabilization window
+            if hpa:
+                hpa_max = hpa.spec.max_replicas or 0
+                for m in (hpa.spec.metrics or []):
+                    if m.type == "Resource" and m.resource:
+                        t = m.resource.target
+                        if m.resource.name == "memory" and t and t.average_utilization:
+                            hpa_mem_pct = t.average_utilization
+                        if m.resource.name == "cpu" and t and t.average_utilization:
+                            hpa_cpu_pct = t.average_utilization
+                try:
+                    sd = hpa.spec.behavior.scale_down
+                    if sd and sd.stabilization_window_seconds is not None:
+                        hpa_sd_secs = sd.stabilization_window_seconds
+                except AttributeError:
+                    pass
+
+            # ════════════════════════════════════════════════════════════════
+            #  MEMORY LADDER CHECKS
+            # ════════════════════════════════════════════════════════════════
+
+            # 1. hard vs K8s limit
+            if hard and k8s_lim_mem:
+                ratio = hard / k8s_lim_mem
+                if hard > k8s_lim_mem:
+                    rec_hard = int(k8s_lim_mem * 0.80)
+                    issues.append(_issue("CRITICAL", "OdooHardExceedsK8sLimit", rid,
+                        f"limit_memory_hard={_gib(hard)} > K8s limit={_gib(k8s_lim_mem)} "
+                        f"→ pod OOMKilled before graceful worker restart. "
+                        f"Recommended hard = {_gib(rec_hard)} ({rec_hard:,} bytes)"))
+                elif ratio > 0.90:
+                    issues.append(_issue("WARNING", "OdooHardTooCloseToLimit", rid,
+                        f"limit_memory_hard={_gib(hard)} is {ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)} "
+                        f"(<10% buffer). Transient spikes will OOMKill the pod. "
+                        f"Target ≤85% ({_gib(int(k8s_lim_mem*0.85))})"))
+                elif ratio < 0.70:
+                    issues.append(_issue("WARNING", "OdooHardRatioLow", rid,
+                        f"limit_memory_hard={_gib(hard)} is only {ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)}. "
+                        f"Workers restarting too early — wasting memory. "
+                        f"Target ≥70–80% ({_gib(int(k8s_lim_mem*0.80))})"))
+
+            # 2. soft vs hard (order check — highest priority)
+            if soft and hard:
+                if soft >= hard:
+                    issues.append(_issue("CRITICAL", "OdooSoftExceedsHard", rid,
+                        f"limit_memory_soft={_gib(soft)} ≥ limit_memory_hard={_gib(hard)} "
+                        f"→ graceful restart never triggered; every termination is abrupt. "
+                        f"Set soft < hard (rule: soft=80% of K8s request, hard=80% of K8s limit)"))
+
+            # 3. soft vs K8s request
+            if soft and k8s_req_mem:
+                ratio_s = soft / k8s_req_mem
+                if soft > k8s_req_mem:
+                    issues.append(_issue("WARNING", "OdooSoftExceedsRequest", rid,
+                        f"limit_memory_soft={_gib(soft)} > K8s request={_gib(k8s_req_mem)} "
+                        f"→ workers restart beyond guaranteed allocation. "
+                        f"Recommended soft ≤ {_gib(int(k8s_req_mem*0.80))}"))
+                elif ratio_s < 0.60:
+                    issues.append(_issue("WARNING", "OdooSoftRatioLow", rid,
+                        f"limit_memory_soft={_gib(soft)} is only {ratio_s*100:.0f}% of K8s request={_gib(k8s_req_mem)} "
+                        f"→ excessive worker churn. "
+                        f"Target 75–80% ({_gib(int(k8s_req_mem*0.80))})"))
+
+            # ════════════════════════════════════════════════════════════════
+            #  WORKER COUNT CHECK
+            # ════════════════════════════════════════════════════════════════
+            if workers == 0:
+                issues.append(_issue("CRITICAL", "WorkersMissing", rid,
+                    f"workers=0 → Odoo running in single-process mode. "
+                    f"No parallelism; one slow request blocks all others. "
+                    f"Set workers={max(1, int(k8s_req_cpu * 2))} (2 per CPU core)"))
+            elif k8s_req_cpu:
+                expected = max(1, int(k8s_req_cpu * 2))
+                if workers != expected:
+                    issues.append(_issue("WARNING", "WorkerCountMismatch", rid,
+                        f"workers={workers} but cpu_request={k8s_req_cpu:.2g} → "
+                        f"expected workers={expected} (rule: 2 per CPU core). "
+                        f"{'Too many: context-switch overhead, excess memory.' if workers > expected else 'Too few: CPU underutilised.'}"))
+
+            # ════════════════════════════════════════════════════════════════
+            #  HPA CHECKS
+            # ════════════════════════════════════════════════════════════════
+            if not hpa:
+                issues.append(_issue("WARNING", "HpaNotFound", rid,
+                    f"No HPA found for deployment '{dep_name}'. "
+                    f"No auto-scaling — a single pod handles all traffic. "
+                    f"Create HPA with memory=80%, cpu=75%, maxReplicas≥5."))
+            else:
+                # maxReplicas
+                if hpa_max and hpa_max < 3:
+                    issues.append(_issue("WARNING", "HpaMaxTooLow", rid,
+                        f"HPA maxReplicas={hpa_max} — very limited scaling headroom. "
+                        f"Recommended ≥5. "
+                        f"kubectl patch hpa <name> -n {ns} -p '{{\"spec\":{{\"maxReplicas\":5}}}}'"))
+
+                # memory alignment
+                if hpa_mem_pct and soft and k8s_req_mem:
+                    hpa_trigger = int(hpa_mem_pct / 100 * k8s_req_mem)
+                    ideal_pct   = round(soft / k8s_req_mem * 100)
+                    deviation   = abs(hpa_trigger - soft) / soft
+                    if deviation > 0.20:
+                        issues.append(_issue("WARNING", "HpaMemoryMisaligned", rid,
+                            f"HPA memory target {hpa_mem_pct}% × request={_gib(k8s_req_mem)} "
+                            f"triggers at {_gib(hpa_trigger)}, "
+                            f"but soft limit is {_gib(soft)} (deviation {deviation*100:.0f}%). "
+                            f"Set averageUtilization={ideal_pct} to align with soft limit."))
+
+                # cpu target
+                if hpa_cpu_pct and hpa_cpu_pct > 85:
+                    issues.append(_issue("WARNING", "HpaCpuTargetHigh", rid,
+                        f"HPA CPU target={hpa_cpu_pct}% — pods run near saturation before scale-out. "
+                        f"Recommended ≤75%. Lower the target to allow faster response to spikes."))
+
+                # scale-down window
+                if hpa_sd_secs < 120:
+                    issues.append(_issue("WARNING", "HpaScaleDownFast", rid,
+                        f"HPA scaleDown.stabilizationWindowSeconds={hpa_sd_secs}s (<120s). "
+                        f"Scale-down too aggressive — may cause oscillation (scale-up/down thrashing). "
+                        f"Recommended ≥300s."))
+
+            # ════════════════════════════════════════════════════════════════
+            #  MISCELLANEOUS CONFIG CHECKS
+            # ════════════════════════════════════════════════════════════════
+            if limit_request and limit_request < 4096:
+                issues.append(_issue("WARNING", "LimitRequestTooLow", rid,
+                    f"limit_request={limit_request} — workers restart after {limit_request} requests (very frequent). "
+                    f"Recommended: 8192. High churn causes warm-up overhead and transient errors."))
+
+            if time_cpu == 0 or time_real == 0:
+                missing = []
+                if time_cpu == 0:  missing.append("limit_time_cpu")
+                if time_real == 0: missing.append("limit_time_real")
+                issues.append(_issue("INFO", "LimitTimeMissing", rid,
+                    f"{', '.join(missing)} not set or zero → unlimited request duration. "
+                    f"Runaway requests can lock workers indefinitely. "
+                    f"Recommended: limit_time_cpu=600, limit_time_real=1200"))
+
+            if logfile and logfile not in ("false", "0", "", "none"):
+                issues.append(_issue("WARNING", "LogfileEnabled", rid,
+                    f"logfile={conf.get('logfile', '')} — logs written to file instead of stdout. "
+                    f"K8s cannot collect file logs via kubectl logs. "
+                    f"Set logfile = False to stream logs to stdout."))
+
+    return issues
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
 # ║  ORCHESTRATOR                                                    ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -1852,7 +2379,7 @@ _SEV_ORDER = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
 def run_all_checks() -> Tuple[Dict[str, Any], float]:
     """Returns (report_dict, duration_seconds)."""
     t0 = time.time()
-    core, apps, batch, rbac, networking = _clients()
+    core, apps, batch, rbac, networking, autoscaling = _clients()
     all_issues: List[Dict] = []
 
     try:
@@ -1890,6 +2417,8 @@ def run_all_checks() -> Tuple[Dict[str, Any], float]:
         ("RBAC",            check_rbac,              (rbac,)),
         ("NetworkPolicies", check_network_policies,  (core, networking)),
         ("NodePortServices",check_nodeport_services, (core,)),
+        # ── Odoo Ladder-of-Limits compliance ────────────────────────────────
+        ("OdooConfig",      check_odoo_config,       (core, apps, autoscaling)),
     ]
 
     for label, fn, args in checks:
