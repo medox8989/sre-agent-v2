@@ -20,7 +20,7 @@ metadata:
     app: sre-agent
     # ── Match the label selector on your Prometheus CRD ─────────────────────
     # Check with: kubectl get prometheus -n monitoring -o yaml | grep serviceMonitorSelector
-    release: prometheus-stack    # kube-prometheus-stack default label
+    release: prometheus          # must match Prometheus CR serviceMonitorSelector
 spec:
   # ── Which namespace(s) to look for the Service ──────────────────────────
   namespaceSelector:

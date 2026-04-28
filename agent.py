@@ -3232,9 +3232,125 @@ if __name__ == "__main__":
 
         print_scaling_report(events, hpa_stats, incidents, node_items)
 
+    elif "--odoo" in sys.argv:
+        # ── Odoo Config Health report ──────────────────────────────────────────
+        # Usage:
+        #   python agent.py --odoo
+        #   python agent.py --odoo --ns awqaf          # single namespace
+        #   kubectl exec -n sre-agent deploy/sre-agent -- python agent.py --odoo
+        #
+        # Prints a full ladder-of-limits compliance report for every Odoo deployment:
+        #   🔴 CRITICAL  — OOMKill-risk misconfigs
+        #   🟡 WARNING   — alignment issues
+        #   ℹ  INFO      — advisory items
+        # Each issue shows the deployment, message, and recommended fix.
+        ts = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        W  = "\033[33m"; R = "\033[31m"; B = "\033[34m"
+        G  = "\033[32m"; C = "\033[36m"; RS = "\033[0m"; BOLD = "\033[1m"
+
+        _ODOO_CHECKS = {
+            "OdooHardExceedsK8sLimit", "OdooHardTooCloseToLimit", "OdooHardRatioLow",
+            "OdooSoftExceedsHard",     "OdooSoftExceedsRequest",  "OdooSoftRatioLow",
+            "WorkersMissing",          "WorkerCountMismatch",
+            "HpaNotFound",             "HpaMemoryMisaligned",     "HpaMaxTooLow",
+            "HpaCpuTargetHigh",        "HpaScaleDownFast",
+            "LimitRequestTooLow",      "LimitTimeMissing",
+            "LogfileEnabled",          "OdooConfigNotFound",
+        }
+
+        SEV_COLOR  = {"CRITICAL": R, "WARNING": W, "INFO": B}
+        SEV_EMOJI  = {"CRITICAL": "🔴", "WARNING": "🟡", "INFO": "ℹ "}
+        SEV_ORDER  = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
+
+        print(f"\n{BOLD}{'─'*72}{RS}")
+        print(f"{BOLD}  Odoo Config Health Report{RS}   {ts}")
+        if _ns_filter:
+            print(f"  Namespace filter: {C}{_ns_filter}{RS}")
+        print(f"{BOLD}{'─'*72}{RS}\n")
+
+        core, apps, _, _, _, autoscaling = _clients()
+        issues = check_odoo_config(core, apps, autoscaling)
+
+        # Filter by namespace if --ns provided
+        if _ns_filter:
+            issues = [i for i in issues if i["resource"].startswith(_ns_filter + "/")]
+
+        # Filter to Odoo checks only (exclude any bleed-through)
+        issues = [i for i in issues if i["check"] in _ODOO_CHECKS]
+        issues.sort(key=lambda x: (SEV_ORDER.get(x["severity"], 3), x["resource"], x["check"]))
+
+        if not issues:
+            print(f"  {G}✅  No Odoo config issues found.{RS}\n")
+        else:
+            # ── Summary counts ─────────────────────────────────────────────
+            n_crit = sum(1 for i in issues if i["severity"] == "CRITICAL")
+            n_warn = sum(1 for i in issues if i["severity"] == "WARNING")
+            n_info = sum(1 for i in issues if i["severity"] == "INFO")
+            n_dep  = len({i["resource"] for i in issues})
+            print(f"  {R}{BOLD}{n_crit} CRITICAL{RS}  "
+                  f"{W}{BOLD}{n_warn} WARNING{RS}  "
+                  f"{B}{n_info} INFO{RS}  "
+                  f"across {BOLD}{n_dep}{RS} deployment(s)\n")
+
+            # ── Group by severity, then deployment ─────────────────────────
+            current_sev = None
+            for iss in issues:
+                sev  = iss["severity"]
+                col  = SEV_COLOR.get(sev, "")
+                em   = SEV_EMOJI.get(sev, "•")
+                dep  = iss["resource"]       # "namespace/deployment"
+                chk  = iss["check"]
+                msg  = iss["message"]
+                rec  = _REC.get(chk, {})
+
+                if sev != current_sev:
+                    label = {"CRITICAL": "CRITICAL — OOMKill Risk",
+                             "WARNING":  "WARNING  — Misalignment",
+                             "INFO":     "INFO     — Advisory"}.get(sev, sev)
+                    print(f"{col}{BOLD}{'─'*72}")
+                    print(f"  {em}  {label}{RS}")
+                    print(f"{col}{BOLD}{'─'*72}{RS}\n")
+                    current_sev = sev
+
+                print(f"  {col}{BOLD}{chk:<32}{RS}  {C}{dep}{RS}")
+                # Wrap message at 68 chars
+                for line in _wrap(msg, 66):
+                    print(f"    {line}")
+                if rec:
+                    print(f"    {W}⚡ Fix : {RS}{_wrap(rec.get('immediate',''), 60)[0] if rec.get('immediate') else ''}")
+                    if len(_wrap(rec.get('immediate',''), 60)) > 1:
+                        for line in _wrap(rec.get('immediate',''), 60)[1:]:
+                            print(f"           {line}")
+                    print(f"    {B}🛡 Prevent: {RS}{_wrap(rec.get('prevent',''), 58)[0] if rec.get('prevent') else ''}")
+                print()
+
+        # ── Per-deployment summary table ───────────────────────────────────
+        print(f"{BOLD}{'─'*72}{RS}")
+        print(f"{BOLD}  Deployment Summary{RS}")
+        print(f"{BOLD}{'─'*72}{RS}")
+        print(f"  {'Namespace/Deployment':<40}  {'CRIT':>4}  {'WARN':>4}  {'INFO':>4}")
+        print(f"  {'─'*40}  {'────':>4}  {'────':>4}  {'────':>4}")
+
+        from collections import defaultdict
+        dep_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: {"CRITICAL":0,"WARNING":0,"INFO":0})
+        for iss in issues:
+            dep_counts[iss["resource"]][iss["severity"]] += 1
+
+        for dep in sorted(dep_counts):
+            c = dep_counts[dep]
+            crit_s = f"{R}{c['CRITICAL']:>4}{RS}" if c["CRITICAL"] else f"{'0':>4}"
+            warn_s = f"{W}{c['WARNING']:>4}{RS}"  if c["WARNING"]  else f"{'0':>4}"
+            info_s = f"{B}{c['INFO']:>4}{RS}"     if c["INFO"]     else f"{'0':>4}"
+            print(f"  {dep:<40}  {crit_s}  {warn_s}  {info_s}")
+
+        print(f"\n  Total: {len(issues)} issues across {len(dep_counts)} deployments\n")
+        print(f"{BOLD}{'─'*72}{RS}\n")
+
     else:
-        start_metrics_server()
         if "--once" in sys.argv:
+            # Skip metrics server — port 8080 is already held by the running agent
             run_once()
         else:
+            start_metrics_server()
             run_loop()
