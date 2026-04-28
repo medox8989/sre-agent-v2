@@ -1,0 +1,610 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "kube-prometheus-stack Prometheus datasource",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "stat",       "name": "Stat",        "version": "" },
+    { "type": "panel", "id": "table",      "name": "Table",       "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "barchart",   "name": "Bar chart",   "version": "" },
+    { "type": "panel", "id": "text",       "name": "Text",        "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Odoo Config Health — ladder-of-limits alignment, workers, HPA, and odoo.conf checks per deployment",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "🏥 Odoo Config Health — Summary",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "green", "index": 0, "text": "✅ CLEAN" }, "1": { "color": "red", "index": 1, "text": "🔴 ISSUES" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Config Status",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(sre_odoo_issue{k8s_namespace=~\"$namespace\"})", "legendFormat": "Total Issues", "refId": "A" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "🔴 Critical",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(sre_odoo_issue{severity=\"CRITICAL\", k8s_namespace=~\"$namespace\"})", "legendFormat": "Critical", "refId": "A" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 5 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "🟡 Warning",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(sre_odoo_issue{severity=\"WARNING\", k8s_namespace=~\"$namespace\"})", "legendFormat": "Warning", "refId": "A" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "ℹ Info",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(sre_odoo_issue{severity=\"INFO\", k8s_namespace=~\"$namespace\"})", "legendFormat": "Info", "refId": "A" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Deployments Affected",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "count(sum by (deployment, k8s_namespace) (sre_odoo_issue{k8s_namespace=~\"$namespace\"} > 0))", "legendFormat": "Deployments", "refId": "A" }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 6,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Namespaces Affected",
+      "type": "stat",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "count(sum by (k8s_namespace) (sre_odoo_issue{k8s_namespace=~\"$namespace\"} > 0))", "legendFormat": "Namespaces", "refId": "A" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "title": "🔴 CRITICAL — OOMKill Prevention",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "left",
+            "displayMode": "color-text",
+            "filterable": true,
+            "minWidth": 120
+          },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null } ] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Namespace" },   "properties": [ { "id": "custom.width", "value": 130 } ] },
+          { "matcher": { "id": "byName", "options": "Deployment" },  "properties": [ { "id": "custom.width", "value": 150 } ] },
+          { "matcher": { "id": "byName", "options": "Check" },       "properties": [ { "id": "custom.width", "value": 200 } ] },
+          { "matcher": { "id": "byName", "options": "Active" },      "properties": [ { "id": "custom.width", "value": 70 }, { "id": "custom.displayMode", "value": "lcd-gauge" }, { "id": "color.mode", "value": "fixed" }, { "id": "color.fixedColor", "value": "red" } ] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "id": 10,
+      "options": {
+        "footer": { "enablePagination": true, "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Active" }]
+      },
+      "title": "🔴 Critical Issues",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": { "mode": "columns", "valueLabel": "Active" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true, "Time": true, "container": true, "endpoint": true,
+              "exported_name": true, "instance": true, "job": true, "pod": true,
+              "service": true, "namespace": true
+            },
+            "renameByName": {
+              "check": "Check",
+              "k8s_namespace": "Namespace",
+              "deployment": "Deployment",
+              "severity": "Severity",
+              "Value": "Active"
+            },
+            "indexByName": {
+              "Namespace": 0, "Deployment": 1, "Check": 2, "Severity": 3, "Active": 4
+            }
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              { "config": { "id": "equal", "options": { "value": "CRITICAL" } }, "fieldName": "Severity" },
+              { "config": { "id": "equal", "options": { "value": "1" } }, "fieldName": "Active" }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sre_odoo_issue{severity=\"CRITICAL\", k8s_namespace=~\"$namespace\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 102,
+      "title": "🟡 WARNING — Misalignment",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "left",
+            "displayMode": "color-text",
+            "filterable": true,
+            "minWidth": 120
+          },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "yellow", "value": null } ] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Namespace" },  "properties": [ { "id": "custom.width", "value": 130 } ] },
+          { "matcher": { "id": "byName", "options": "Deployment" }, "properties": [ { "id": "custom.width", "value": 150 } ] },
+          { "matcher": { "id": "byName", "options": "Check" },      "properties": [ { "id": "custom.width", "value": 220 } ] },
+          { "matcher": { "id": "byName", "options": "Active" },     "properties": [ { "id": "custom.width", "value": 70 }, { "id": "custom.displayMode", "value": "lcd-gauge" }, { "id": "color.mode", "value": "fixed" }, { "id": "color.fixedColor", "value": "yellow" } ] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "id": 11,
+      "options": {
+        "footer": { "enablePagination": true, "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": false, "displayName": "Check" }]
+      },
+      "title": "🟡 Warning Issues",
+      "transformations": [
+        { "id": "labelsToFields", "options": { "mode": "columns", "valueLabel": "Active" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true, "Time": true, "container": true, "endpoint": true,
+              "exported_name": true, "instance": true, "job": true, "pod": true,
+              "service": true, "namespace": true
+            },
+            "renameByName": {
+              "check": "Check", "k8s_namespace": "Namespace",
+              "deployment": "Deployment", "severity": "Severity", "Value": "Active"
+            },
+            "indexByName": { "Namespace": 0, "Deployment": 1, "Check": 2, "Severity": 3, "Active": 4 }
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              { "config": { "id": "equal", "options": { "value": "WARNING" } }, "fieldName": "Severity" },
+              { "config": { "id": "equal", "options": { "value": "1" } }, "fieldName": "Active" }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sre_odoo_issue{severity=\"WARNING\", k8s_namespace=~\"$namespace\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "id": 103,
+      "title": "ℹ INFO — Advisory",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "align": "left", "displayMode": "color-text", "filterable": true, "minWidth": 120 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Namespace" },  "properties": [ { "id": "custom.width", "value": 130 } ] },
+          { "matcher": { "id": "byName", "options": "Deployment" }, "properties": [ { "id": "custom.width", "value": 150 } ] },
+          { "matcher": { "id": "byName", "options": "Check" },      "properties": [ { "id": "custom.width", "value": 220 } ] }
+        ]
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 26 },
+      "id": 12,
+      "options": { "footer": { "enablePagination": true, "show": false }, "showHeader": true },
+      "title": "ℹ Info / Advisory",
+      "transformations": [
+        { "id": "labelsToFields", "options": { "mode": "columns", "valueLabel": "Active" } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true, "Time": true, "container": true, "endpoint": true,
+              "exported_name": true, "instance": true, "job": true, "pod": true,
+              "service": true, "namespace": true
+            },
+            "renameByName": {
+              "check": "Check", "k8s_namespace": "Namespace",
+              "deployment": "Deployment", "severity": "Severity", "Value": "Active"
+            },
+            "indexByName": { "Namespace": 0, "Deployment": 1, "Check": 2, "Severity": 3, "Active": 4 }
+          }
+        },
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              { "config": { "id": "equal", "options": { "value": "INFO" } }, "fieldName": "Severity" },
+              { "config": { "id": "equal", "options": { "value": "1" } }, "fieldName": "Active" }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sre_odoo_issue{severity=\"INFO\", k8s_namespace=~\"$namespace\"}",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "id": 104,
+      "title": "📊 Issue Distribution",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "id": 20,
+      "options": {
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "normal",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 200
+      },
+      "title": "Issues per Deployment",
+      "type": "barchart",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (deployment, k8s_namespace) (sre_odoo_issue{severity=\"CRITICAL\", k8s_namespace=~\"$namespace\"})",
+          "instant": true,
+          "legendFormat": "🔴 {{k8s_namespace}}/{{deployment}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (deployment, k8s_namespace) (sre_odoo_issue{severity=\"WARNING\", k8s_namespace=~\"$namespace\"})",
+          "instant": true,
+          "legendFormat": "🟡 {{k8s_namespace}}/{{deployment}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineWidth": 1 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "id": 21,
+      "options": {
+        "barWidth": 0.7,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "normal",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 200
+      },
+      "title": "Issues per Check Type",
+      "type": "barchart",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (check) (sre_odoo_issue{k8s_namespace=~\"$namespace\", severity=\"CRITICAL\"})",
+          "instant": true,
+          "legendFormat": "🔴 {{check}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (check) (sre_odoo_issue{k8s_namespace=~\"$namespace\", severity=\"WARNING\"})",
+          "instant": true,
+          "legendFormat": "🟡 {{check}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "id": 105,
+      "title": "📈 Issue History",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 15, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "stepAfter", "lineWidth": 2, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "auto", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 42 },
+      "id": 30,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "title": "Issue Count Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(sre_odoo_issue{severity=\"CRITICAL\", k8s_namespace=~\"$namespace\"})",
+          "legendFormat": "🔴 Critical",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(sre_odoo_issue{severity=\"WARNING\", k8s_namespace=~\"$namespace\"})",
+          "legendFormat": "🟡 Warning",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(sre_odoo_issue{severity=\"INFO\", k8s_namespace=~\"$namespace\"})",
+          "legendFormat": "ℹ Info",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "id": 106,
+      "title": "📖 Check Reference",
+      "type": "row"
+    },
+
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": { "align": "left", "displayMode": "auto", "filterable": true, "minWidth": 100 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Check" },      "properties": [ { "id": "custom.width", "value": 220 } ] },
+          { "matcher": { "id": "byName", "options": "Root Cause" }, "properties": [ { "id": "custom.width", "value": 280 } ] },
+          { "matcher": { "id": "byName", "options": "Fix Now" },    "properties": [ { "id": "custom.width", "value": 280 } ] },
+          { "matcher": { "id": "byName", "options": "Prevent" },    "properties": [ { "id": "custom.width", "value": 280 } ] }
+        ]
+      },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 51 },
+      "id": 40,
+      "options": { "footer": { "enablePagination": true, "show": false }, "showHeader": true },
+      "title": "Recommendations — All Active Odoo Checks",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": { "mode": "columns", "valueLabel": "Active" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true, "Time": true, "container": true, "endpoint": true,
+              "exported_name": true, "instance": true, "job": true, "pod": true,
+              "service": true, "namespace": true, "Active": true
+            },
+            "renameByName": {
+              "check": "Check",
+              "root_cause": "Root Cause",
+              "immediate": "Fix Now",
+              "prevent": "Prevent"
+            },
+            "indexByName": { "Check": 0, "Root Cause": 1, "Fix Now": 2, "Prevent": 3 }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "(sum by (check) (sre_odoo_issue{k8s_namespace=~\"$namespace\"}) > 0) * on(check) group_left(root_cause, immediate, prevent) sre_check_rec_info",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "A"
+        }
+      ],
+      "type": "table"
+    }
+
+  ],
+
+  "refresh": "30s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["sre-agent", "odoo", "config", "ladder-of-limits"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(sre_odoo_issue, k8s_namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Namespace",
+        "multi": true,
+        "name": "namespace",
+        "options": [],
+        "query": { "query": "label_values(sre_odoo_issue, k8s_namespace)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-3h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Odoo Config Health",
+  "uid": "odoo-config-health",
+  "version": 1
+}

@@ -747,6 +747,14 @@ if PROMETHEUS_ENABLED:
                              'object, kind, truncated message, bucket, count',
                              ['k8s_namespace', 'reason', 'object', 'kind', 'message', 'bucket'])
 
+    # ── Per-deployment Odoo config issue metric ───────────────────────────────
+    # 1 = active issue, 0 = cleared.  Enables the Odoo Config Health dashboard
+    # to show per-namespace / per-deployment breakdown of ladder-of-limits checks.
+    _g_odoo_issue = Gauge('sre_odoo_issue',
+                          '1 = active Odoo config issue for this deployment, 0 = cleared. '
+                          'Covers memory ladder, workers, HPA, and odoo.conf settings.',
+                          ['check', 'severity', 'k8s_namespace', 'deployment'])
+
     def _setup_rec_metrics():
         """Populate sre_check_rec_info once at process startup — static, never changes."""
         for chk, rec in _REC.items():
@@ -763,11 +771,13 @@ if PROMETHEUS_ENABLED:
     _seen_ns_event_labels: Set[Tuple[str, str]] = set()
     _seen_reason_event_labels: Set[Tuple[str, str, str]] = set()
     _seen_event_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
+    _seen_odoo_issue_labels:   Set[Tuple[str, str, str, str]] = set()
 
     def update_metrics(report: Dict[str, Any], duration: float) -> None:
         """Update all Prometheus metrics from the latest report."""
         global _prev_issue_keys, _seen_check_labels, \
-               _seen_ns_event_labels, _seen_reason_event_labels, _seen_event_detail_labels
+               _seen_ns_event_labels, _seen_reason_event_labels, _seen_event_detail_labels, \
+               _seen_odoo_issue_labels
 
         s = report["summary"]
         _g_critical.set(s["critical"])
@@ -813,6 +823,36 @@ if PROMETHEUS_ENABLED:
 
         _seen_check_labels = new_check_labels
         _prev_issue_keys = current_keys
+
+        # ── Odoo per-deployment issue metrics ────────────────────────────────
+        _ODOO_CHECKS = {
+            "OdooHardExceedsK8sLimit", "OdooHardTooCloseToLimit", "OdooHardRatioLow",
+            "OdooSoftExceedsHard", "OdooSoftExceedsRequest", "OdooSoftRatioLow",
+            "WorkersMissing", "WorkerCountMismatch",
+            "HpaNotFound", "HpaMemoryMisaligned", "HpaMaxTooLow",
+            "HpaCpuTargetHigh", "HpaScaleDownFast",
+            "LimitRequestTooLow", "LimitTimeMissing", "LogfileEnabled", "OdooConfigNotFound",
+        }
+        new_odoo_labels: Set[Tuple[str, str, str, str]] = set()
+        for issue in report["issues"]:
+            if issue["check"] not in _ODOO_CHECKS:
+                continue
+            res    = issue["resource"]          # "namespace/deployment"
+            parts  = res.split("/", 1)
+            ns_p   = parts[0] if len(parts) == 2 else ""
+            dep_p  = parts[1] if len(parts) == 2 else parts[0]
+            lbl    = (issue["check"], issue["severity"], ns_p, dep_p)
+            _g_odoo_issue.labels(
+                check=lbl[0], severity=lbl[1],
+                k8s_namespace=lbl[2], deployment=lbl[3],
+            ).set(1)
+            new_odoo_labels.add(lbl)
+        for lbl in _seen_odoo_issue_labels - new_odoo_labels:
+            _g_odoo_issue.labels(
+                check=lbl[0], severity=lbl[1],
+                k8s_namespace=lbl[2], deployment=lbl[3],
+            ).set(0)
+        _seen_odoo_issue_labels = new_odoo_labels
 
         # ── Event-timeline metrics ────────────────────────────────────────────
         # Aggregate counts from event issues (check starts with "Event:")
