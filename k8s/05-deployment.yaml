@@ -27,6 +27,20 @@ spec:
       imagePullSecrets:
         - name: ocir-secret    # copied from another namespace — see deploy.sh
 
+      # ── Tolerate all node pools (prod + demo) and autoscaler taints ─────
+      tolerations:
+        - key: "env"
+          operator: "Equal"
+          value: "prod"
+          effect: "NoSchedule"
+        - key: "env"
+          operator: "Equal"
+          value: "demo"
+          effect: "NoSchedule"
+        - key: "DeletionCandidateOfClusterAutoscaler"
+          operator: "Exists"
+          effect: "PreferNoSchedule"
+
       # ── Non-root security context ────────────────────────────────────────
       securityContext:
         runAsNonRoot: true

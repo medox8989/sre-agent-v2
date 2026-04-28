@@ -2301,41 +2301,52 @@ def check_odoo_config(core: client.CoreV1Api,
                 if hard > k8s_lim_mem:
                     rec_hard = int(k8s_lim_mem * 0.80)
                     issues.append(_issue("CRITICAL", "OdooHardExceedsK8sLimit", rid,
-                        f"limit_memory_hard={_gib(hard)} > K8s limit={_gib(k8s_lim_mem)} "
+                        f"limit_memory_hard={_gib(hard)} ({int(hard):,} bytes) > "
+                        f"K8s limit={_gib(k8s_lim_mem)} ({int(k8s_lim_mem):,} bytes) "
                         f"→ pod OOMKilled before graceful worker restart. "
                         f"Recommended hard = {_gib(rec_hard)} ({rec_hard:,} bytes)"))
                 elif ratio > 0.90:
+                    rec_hard = int(k8s_lim_mem * 0.85)
                     issues.append(_issue("WARNING", "OdooHardTooCloseToLimit", rid,
-                        f"limit_memory_hard={_gib(hard)} is {ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)} "
+                        f"limit_memory_hard={_gib(hard)} ({int(hard):,} bytes) is "
+                        f"{ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)} ({int(k8s_lim_mem):,} bytes) "
                         f"(<10% buffer). Transient spikes will OOMKill the pod. "
-                        f"Target ≤85% ({_gib(int(k8s_lim_mem*0.85))})"))
+                        f"Target ≤85% → {_gib(rec_hard)} ({rec_hard:,} bytes)"))
                 elif ratio < 0.70:
+                    rec_hard = int(k8s_lim_mem * 0.80)
                     issues.append(_issue("WARNING", "OdooHardRatioLow", rid,
-                        f"limit_memory_hard={_gib(hard)} is only {ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)}. "
+                        f"limit_memory_hard={_gib(hard)} ({int(hard):,} bytes) is only "
+                        f"{ratio*100:.0f}% of K8s limit={_gib(k8s_lim_mem)} ({int(k8s_lim_mem):,} bytes). "
                         f"Workers restarting too early — wasting memory. "
-                        f"Target ≥70–80% ({_gib(int(k8s_lim_mem*0.80))})"))
+                        f"Target ≥70–80% → {_gib(rec_hard)} ({rec_hard:,} bytes)"))
 
             # 2. soft vs hard (order check — highest priority)
             if soft and hard:
                 if soft >= hard:
+                    rec_soft = int(k8s_req_mem * 0.80) if k8s_req_mem else int(hard * 0.80)
                     issues.append(_issue("CRITICAL", "OdooSoftExceedsHard", rid,
-                        f"limit_memory_soft={_gib(soft)} ≥ limit_memory_hard={_gib(hard)} "
+                        f"limit_memory_soft={_gib(soft)} ({int(soft):,} bytes) ≥ "
+                        f"limit_memory_hard={_gib(hard)} ({int(hard):,} bytes) "
                         f"→ graceful restart never triggered; every termination is abrupt. "
-                        f"Set soft < hard (rule: soft=80% of K8s request, hard=80% of K8s limit)"))
+                        f"Set soft < hard. Recommended soft = {_gib(rec_soft)} ({rec_soft:,} bytes)"))
 
             # 3. soft vs K8s request
             if soft and k8s_req_mem:
                 ratio_s = soft / k8s_req_mem
                 if soft > k8s_req_mem:
+                    rec_soft = int(k8s_req_mem * 0.80)
                     issues.append(_issue("WARNING", "OdooSoftExceedsRequest", rid,
-                        f"limit_memory_soft={_gib(soft)} > K8s request={_gib(k8s_req_mem)} "
+                        f"limit_memory_soft={_gib(soft)} ({int(soft):,} bytes) > "
+                        f"K8s request={_gib(k8s_req_mem)} ({int(k8s_req_mem):,} bytes) "
                         f"→ workers restart beyond guaranteed allocation. "
-                        f"Recommended soft ≤ {_gib(int(k8s_req_mem*0.80))}"))
+                        f"Recommended soft ≤ {_gib(rec_soft)} ({rec_soft:,} bytes)"))
                 elif ratio_s < 0.60:
+                    rec_soft = int(k8s_req_mem * 0.80)
                     issues.append(_issue("WARNING", "OdooSoftRatioLow", rid,
-                        f"limit_memory_soft={_gib(soft)} is only {ratio_s*100:.0f}% of K8s request={_gib(k8s_req_mem)} "
+                        f"limit_memory_soft={_gib(soft)} ({int(soft):,} bytes) is only "
+                        f"{ratio_s*100:.0f}% of K8s request={_gib(k8s_req_mem)} ({int(k8s_req_mem):,} bytes) "
                         f"→ excessive worker churn. "
-                        f"Target 75–80% ({_gib(int(k8s_req_mem*0.80))})"))
+                        f"Target 75–80% → {_gib(rec_soft)} ({rec_soft:,} bytes)"))
 
             # ════════════════════════════════════════════════════════════════
             #  WORKER COUNT CHECK
@@ -2377,9 +2388,10 @@ def check_odoo_config(core: client.CoreV1Api,
                     if deviation > 0.20:
                         issues.append(_issue("WARNING", "HpaMemoryMisaligned", rid,
                             f"HPA memory target {hpa_mem_pct}% × request={_gib(k8s_req_mem)} "
-                            f"triggers at {_gib(hpa_trigger)}, "
-                            f"but soft limit is {_gib(soft)} (deviation {deviation*100:.0f}%). "
-                            f"Set averageUtilization={ideal_pct} to align with soft limit."))
+                            f"triggers at {_gib(hpa_trigger)} ({hpa_trigger:,} bytes), "
+                            f"but soft limit is {_gib(soft)} ({int(soft):,} bytes) "
+                            f"(deviation {deviation*100:.0f}%). "
+                            f"Set averageUtilization={ideal_pct} to align HPA trigger with soft limit."))
 
                 # cpu target
                 if hpa_cpu_pct and hpa_cpu_pct > 85:
