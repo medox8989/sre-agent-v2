@@ -2186,7 +2186,17 @@ def check_odoo_config(core: client.CoreV1Api,
     """
     issues: List[Dict] = []
 
-    for ns in APP_NAMESPACES:
+    # Discover all namespaces dynamically — skip system namespaces
+    _SKIP_NS = {"kube-system", "kube-public", "kube-node-lease",
+                "sre-agent", "monitoring", "cert-manager",
+                "ingress-nginx", "nfs", "falco", "trivy", "trivy-system"}
+    try:
+        all_ns = [n.metadata.name for n in core.list_namespace(limit=200).items
+                  if n.metadata.name not in _SKIP_NS]
+    except ApiException:
+        all_ns = []
+
+    for ns in all_ns:
         # ── Fetch deployments ────────────────────────────────────────────────
         try:
             deploys = apps.list_namespaced_deployment(ns, limit=50).items
@@ -3207,7 +3217,7 @@ if __name__ == "__main__":
         print(f"[{ts}]    History  : {SCALING_HISTORY_H}h   "
               f"│  Recent window : {SCALING_RECENT_MINS} min")
 
-        core, apps, batch, rbac, networking = _clients()
+        core, apps, batch, rbac, networking, autoscaling = _clients()
 
         try:
             node_items = core.list_node(limit=100).items
