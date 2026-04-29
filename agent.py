@@ -930,7 +930,33 @@ class MetricsCollector:
                 "mem_mi":       mem_mi,
                 "mem_alloc_mi": ma,
                 "mem_pct":      round(mem_mi / ma * 100, 1) if ma else 0.0,
+                # disk fields populated below
+                "disk_cap_gi":  0.0,
+                "disk_avail_gi": 0.0,
+                "disk_used_gi": 0.0,
+                "disk_pct":     0.0,
             })
+
+        # ── Node disk usage (kubelet /stats/summary via API proxy) ────────
+        for node_item in node_snap:
+            nname = node_item["name"]
+            try:
+                raw   = core.connect_get_node_proxy_with_path(nname, "stats/summary")
+                stats = json.loads(raw)
+                fs    = stats.get("node", {}).get("fs", {})
+                cap_b   = fs.get("capacityBytes",  0) or 0
+                avail_b = fs.get("availableBytes", 0) or 0
+                used_b  = fs.get("usedBytes",      0) or 0
+                # metrics-server sometimes omits usedBytes — derive from cap - avail
+                if not used_b and cap_b and avail_b:
+                    used_b = cap_b - avail_b
+                gi = 1024 ** 3
+                node_item["disk_cap_gi"]   = round(cap_b   / gi, 1)
+                node_item["disk_avail_gi"] = round(avail_b / gi, 1)
+                node_item["disk_used_gi"]  = round(used_b  / gi, 1)
+                node_item["disk_pct"]      = round(used_b / cap_b * 100, 1) if cap_b else 0.0
+            except Exception:
+                pass   # graceful degradation: disk fields remain 0
 
         # ── Pod real usage per namespace (metrics-server) ────────────────
         ns_cpu_real: Dict[str, int] = {}
@@ -1222,8 +1248,11 @@ function makeBar(pct,segs){
 }
 
 /* ── CPU / Mem formatters ─────────────────────────────────────────── */
-function fmtCpuM(m){return m>=1000?(m/1000).toFixed(3).replace(/\.?0+$/,'')+' c':m+' m';}
-function fmtCpuTick(m){return m>=1000?(m/1000).toFixed(1)+'c':m+'m';}
+function fmtCpuM(m){
+  if(m>=1000) return parseFloat((m/1000).toFixed(2))+' c';
+  return parseFloat(m.toFixed ? m.toFixed(1) : m)+' m';
+}
+function fmtCpuTick(m){return m>=1000?(m/1000).toFixed(1)+'c':Math.round(m)+'m';}
 function fmtMemGi(mi){return (mi/1024).toFixed(2)+' Gi';}
 function fmtMemTick(mi){return mi>=1024?(mi/1024).toFixed(1)+'Gi':Math.round(mi)+'Mi';}
 
@@ -1372,13 +1401,34 @@ function renderNodes(nodes){
       ? '<br><span style="background:#21262d;border:1px solid #30363d;border-radius:3px;'+
         'padding:1px 6px;font-size:10px;color:var(--org)">'+esc(n.instance_type)+capStr+'</span>'
       : '';
-    var nameCell = '<span class="mono">'+esc(n.name)+'</span>'+typeTag;
+    /* taints */
+    var taintsHtml='';
+    if(n.taints&&n.taints.length){
+      taintsHtml='<br>'+n.taints.map(function(t){
+        var col=t.indexOf('NoSchedule')>=0?'#f85149':t.indexOf('NoExecute')>=0?'#ffa657':'#79c0ff';
+        return '<span style="background:#0d1117;border:1px solid '+col+'44;border-radius:3px;'+
+          'padding:1px 5px;font-size:10px;color:'+col+';margin-right:3px;white-space:nowrap">&#x26D4; '+esc(t)+'</span>';
+      }).join('');
+    }
+    /* disk column — live data from MetricsCollector (mn), static cap from node_overview (n) */
+    var diskCell = '—';
+    var diskSrc = (mn && mn.disk_cap_gi) ? mn : (n.disk_cap_gi ? n : null);
+    if(diskSrc){
+      var dp = diskSrc.disk_pct||0;
+      diskCell = '<span style="color:'+valCol(dp)+';font-weight:700">'+dp.toFixed(1)+'%</span>'+
+        '<br><span class="mu" style="font-size:10px">'+
+          (diskSrc.disk_used_gi||0).toFixed(1)+' Gi used<br>'+
+          (diskSrc.disk_avail_gi||0).toFixed(1)+' Gi free<br>'+
+          (diskSrc.disk_cap_gi||0).toFixed(1)+' Gi total</span>';
+    }
+    var nameCell = '<span class="mono">'+esc(n.name)+'</span>'+typeTag+taintsHtml;
 
     return '<tr>'+
       '<td>'+nameCell+'</td>'+
       '<td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
       '<td class="mono mu">'+cpuCell+'</td>'+
       '<td class="mono mu">'+memCell+'</td>'+
+      '<td class="mono mu">'+diskCell+'</td>'+
       '<td class="mono mu">'+esc(n.age||'—')+'</td>'+
       '</tr>';
   });
@@ -1386,6 +1436,7 @@ function renderNodes(nodes){
     '<th>Node / Type</th><th>Status</th>'+
     '<th>CPU &nbsp;<span class="mu" style="font-weight:400">(alloc / total / used%)</span></th>'+
     '<th>RAM &nbsp;<span class="mu" style="font-weight:400">(alloc / total / used%)</span></th>'+
+    '<th>Disk &nbsp;<span class="mu" style="font-weight:400">(used / free / total)</span></th>'+
     '<th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
@@ -1453,6 +1504,15 @@ function renderNodeBars(nodes){
         '<div class="nbar-line"><span class="nbar-lbl">RAM</span>'+
           '<span class="bar-segs">'+makeBar(n.mem_pct)+'</span>'+
           '<span class="nbar-val" style="color:'+valCol(n.mem_pct)+'">'+n.mem_pct.toFixed(1)+'%</span></div>'+
+        (n.disk_cap_gi ?
+          '<div class="nbar-line"><span class="nbar-lbl">DISK</span>'+
+            '<span class="bar-segs">'+makeBar(n.disk_pct||0)+'</span>'+
+            '<span class="nbar-val" style="color:'+valCol(n.disk_pct||0)+'">'+
+              (n.disk_pct ? n.disk_pct.toFixed(1)+'%' : '—')+'</span>'+
+            '<span style="font-size:9px;color:var(--mu);margin-left:5px">'+
+              (n.disk_used_gi||0).toFixed(1)+' / '+(n.disk_cap_gi||0).toFixed(1)+' Gi'+
+            '</span></div>'
+        : '') +
       '</div>'+
       '</div>';
   });
@@ -1933,6 +1993,14 @@ def node_overview(node_items: list) -> List[Dict]:
         disk_p   = conditions.get("DiskPressure") == "True"
         mem_p    = conditions.get("MemoryPressure") == "True"
         pid_p    = conditions.get("PIDPressure") == "True"
+        # Build taint list: "key=value:effect" or "key:effect"
+        taints = []
+        for t in (node.spec.taints or []):
+            s = t.key
+            if t.value:
+                s += "=" + t.value
+            s += ":" + (t.effect or "NoSchedule")
+            taints.append(s)
         flags = []
         if disk_p: flags.append(f"{R}DiskPressure{RS}")
         if mem_p:  flags.append(f"{R}MemPressure{RS}")
@@ -1943,10 +2011,13 @@ def node_overview(node_items: list) -> List[Dict]:
             "disk_pressure": disk_p,
             "mem_pressure":  mem_p,
             "pid_pressure":  pid_p,
+            "taints":         taints,
             "cpu_alloc_m":  _cpu(alloc.get("cpu", "0")),
             "mem_alloc_mi": _mem(alloc.get("memory", "0")),
             "cpu_cap_m":      _cpu(cap.get("cpu", "0")),
             "mem_cap_mi":     _mem(cap.get("memory", "0")),
+            "disk_alloc_gi":  round(_mem(alloc.get("ephemeral-storage", "0")) / 1024, 1),
+            "disk_cap_gi":    round(_mem(cap.get("ephemeral-storage", "0")) / 1024, 1),
             "instance_type":  instance_type,
             "age":            _age(created),
             # CLI-only: ANSI-coloured flag strings for print_report

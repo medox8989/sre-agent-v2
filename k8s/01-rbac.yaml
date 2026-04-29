@@ -26,6 +26,11 @@ rules:
       - events
       - configmaps        # Odoo config check: reads odoo.conf ConfigMaps
     verbs: ["get", "list"]
+  # Node proxy — for kubelet /stats/summary (disk usage per node)
+  - apiGroups: [""]
+    resources:
+      - nodes/proxy
+    verbs: ["get"]
   # Apps resources
   - apiGroups: ["apps"]
     resources:
