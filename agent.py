@@ -846,7 +846,7 @@ _WEB_UI = r"""<!DOCTYPE html>
 <title>SRE Agent</title>
 <style>
 :root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;
-      --red:#f85149;--yel:#e3b341;--blu:#58a6ff;--grn:#3fb950;--pur:#d2a8ff;}
+      --red:#f85149;--yel:#e3b341;--blu:#58a6ff;--grn:#3fb950;--pur:#d2a8ff;--org:#ffa657;}
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--bg);color:var(--tx);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;}
 a{color:var(--blu);}
@@ -881,6 +881,9 @@ section{padding:0 20px 18px;}
 h2{font-size:11px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;
    padding:10px 0 5px;border-top:1px solid var(--bd);display:flex;align-items:center;gap:6px;}
 h2 .cnt{font-weight:400;color:var(--mu);}
+.ns-group{margin-bottom:14px;}
+.ns-hdr{font-size:10px;font-weight:700;color:var(--org);text-transform:uppercase;letter-spacing:.07em;
+        padding:4px 0 3px;border-bottom:1px solid var(--bd);margin-bottom:4px;}
 table{width:100%;border-collapse:collapse;}
 th{text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;
    color:var(--mu);border-bottom:1px solid var(--bd);background:var(--bg2);position:sticky;top:0;}
@@ -898,9 +901,11 @@ tr:hover td{background:var(--bg3);}
 .ev-N{color:var(--yel);}
 .ev-V{color:var(--grn);}
 .empty{color:var(--mu);font-style:italic;padding:10px 0;font-size:12px;}
-.sp{display:inline-block;width:11px;height:11px;border:2px solid var(--bd);border-top-color:var(--blu);
-    border-radius:50%;animation:spin .7s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg);}}
+.ts-cell{white-space:nowrap;color:var(--mu);font-size:11px;}
+.cur-state{color:var(--mu);font-size:10px;font-style:italic;}
+.rec{margin-top:4px;padding:4px 8px;background:rgba(88,166,255,.07);border-left:2px solid var(--blu);
+     color:var(--mu);font-size:11px;border-radius:0 3px 3px 0;}
+.rec-lbl{color:var(--blu);font-weight:600;font-size:10px;text-transform:uppercase;margin-right:4px;}
 </style>
 </head>
 <body>
@@ -914,7 +919,7 @@ tr:hover td{background:var(--bg3);}
 </header>
 <div class="cards" id="cards"></div>
 <div class="ctrl">
-  <label>History&nbsp;</label>
+  <label>Window&nbsp;</label>
   <button class="btn" id="h0" onclick="setH(.25)">15m</button>
   <button class="btn on" id="h1" onclick="setH(1)">1h</button>
   <button class="btn" id="h3" onclick="setH(3)">3h</button>
@@ -926,46 +931,108 @@ tr:hover td{background:var(--bg3);}
   <button class="btn sev-W on" id="sb-W" onclick="togS('W')">&#128993; Warning</button>
   <button class="btn sev-I on" id="sb-I" onclick="togS('I')">&#8505;&#65039; Info</button>
 </div>
+<!-- ── Issues ──────────────────────────────────────────────────────────── -->
 <section>
-  <h2>Issues <span class="cnt" id="i-cnt"></span></h2>
+  <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
   <div id="iss"></div>
 </section>
+<!-- ── Odoo Config Checks ─────────────────────────────────────────────── -->
 <section>
-  <h2>Nodes</h2>
+  <h2>&#128336; Odoo Config Checks <span class="cnt" id="odoo-cnt"></span></h2>
+  <div id="odoo"></div>
+</section>
+<!-- ── Nodes ──────────────────────────────────────────────────────────── -->
+<section>
+  <h2>&#128736; Nodes</h2>
   <div id="nds"></div>
 </section>
+<!-- ── K8s Events by namespace ────────────────────────────────────────── -->
 <section>
-  <h2>Node Scaling &amp; Status Events <span class="cnt" id="ne-cnt"></span></h2>
+  <h2>&#128203; K8s Events by Namespace <span class="cnt" id="ke-cnt"></span></h2>
+  <div id="kevt"></div>
+</section>
+<!-- ── Node Scaling Events ────────────────────────────────────────────── -->
+<section>
+  <h2>&#128200; Node Scaling &amp; Status Events <span class="cnt" id="ne-cnt"></span></h2>
   <div id="nevt"></div>
 </section>
 <script>
-var st={h:1,sv:{C:1,W:1,I:1},d:null};
-var RSEC=60,_rt=null,_el=0;
+var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[]};
+var RSEC=60,_el=0;
 
+/* ── helpers ──────────────────────────────────────────────────────────── */
+function esc(v){return String(v===null||v===undefined?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmtTs(ts){return ts?ts.substring(0,19).replace('T',' ')+' UTC':'';}
+function cutoff(){
+  var now=new Date();
+  now.setTime(now.getTime()-st.h*3600000);
+  return now.toISOString().substring(0,19);   /* YYYY-MM-DDTHH:MM:SS */
+}
+
+/* ── window / severity filters ──────────────────────────────────────── */
 function setH(h){
   st.h=h;
   ['h0','h1','h3','h6','h12','h24'].forEach(function(id){document.getElementById(id).classList.remove('on');});
   var m={0.25:'h0',1:'h1',3:'h3',6:'h6',12:'h12',24:'h24'};
   if(m[h])document.getElementById(m[h]).classList.add('on');
-  fetch('/api/node-events?hours='+h).then(function(r){return r.json();}).then(renderNE).catch(function(){});
+  /* re-render everything that uses the time window */
+  renderIss();
+  renderOdoo();
+  renderKevt(st.d?st.d.issues:[]);
+  fetch('/api/node-events?hours='+h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
 }
-
 function togS(s){
   st.sv[s]=st.sv[s]?0:1;
   var b=document.getElementById('sb-'+s);
   if(b){b.classList.toggle('on',!!st.sv[s]);}
   renderIss();
+  renderOdoo();
+  renderKevt(st.d?st.d.issues:[]);
 }
 
-function esc(v){return String(v===null||v===undefined?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+/* ── shared issue filter ─────────────────────────────────────────────── */
+var SV_MAP={CRITICAL:'C',WARNING:'W',INFO:'I'};
+function issInWindow(i){
+  /* issues with a ts are time-stamped events → apply window filter.
+     issues without a ts are "current state" checks → always show. */
+  if(!i.ts) return true;
+  return i.ts.substring(0,19)>=cutoff();
+}
+function issVisible(i,section){
+  /* section: 'infra' | 'odoo' | 'event' */
+  var isEvent=i.check.startsWith('Event:');
+  var isOdoo=!!i.odoo;
+  if(section==='infra'  && (isEvent||isOdoo)) return false;
+  if(section==='odoo'   && !isOdoo)           return false;
+  if(section==='event'  && !isEvent)           return false;
+  var k=SV_MAP[i.severity]||'I';
+  if(!st.sv[k]) return false;
+  return issInWindow(i);
+}
 
-function fmtTs(ts){return ts?ts.substring(0,19).replace('T',' ')+' UTC':'';}
+/* ── issue row builder ───────────────────────────────────────────────── */
+function issRow(i){
+  var tsCell=i.ts
+    ?'<span class="ts-cell">'+esc(fmtTs(i.ts))+'</span>'+(i.age?'<br><span class="mu" style="font-size:10px">'+esc(i.age)+' ago</span>':'')
+    :'<span class="cur-state">current state</span>';
+  var recHtml='';
+  if(i.action){
+    recHtml='<div class="rec"><span class="rec-lbl">&#128295; Fix:</span>'+esc(i.action)+'</div>';
+  }
+  return '<tr>'+
+    '<td class="sv-'+esc(i.severity)+' mono" style="white-space:nowrap">'+esc(i.severity)+'</td>'+
+    '<td class="ts-cell">'+tsCell+'</td>'+
+    '<td class="mono mu">'+esc(i.check)+'</td>'+
+    '<td class="mono" style="color:var(--blu)">'+esc(i.resource)+'</td>'+
+    '<td>'+esc(i.message)+recHtml+'</td>'+
+    '</tr>';
+}
 
+/* ── render: header cards ─────────────────────────────────────────────── */
 function renderCards(d){
   var s=d.summary||{};
   var ok=d.healthy;
-  var dot=document.getElementById('sdot');
-  dot.className='sdot '+(ok?'sdot-ok':'sdot-err');
+  document.getElementById('sdot').className='sdot '+(ok?'sdot-ok':'sdot-err');
   document.getElementById('cluster-name').textContent=d.cluster||'—';
   document.getElementById('last-check').textContent='Last check: '+fmtTs(d.checked_at);
   var dur=d.check_duration?d.check_duration.toFixed(1)+'s':'—';
@@ -977,47 +1044,105 @@ function renderCards(d){
     '<div class="card c-dur"><div class="lbl">Duration</div><div class="val">'+dur+'</div></div>';
 }
 
+/* ── render: infra issues (no events, no odoo) ──────────────────────── */
 function renderIss(){
   var d=st.d; if(!d)return;
-  var SV_MAP={CRITICAL:'C',WARNING:'W',INFO:'I'};
-  var iss=(d.issues||[]).filter(function(i){
-    var k=SV_MAP[i.severity]||'I';
-    return !i.check.startsWith('Event:')&&st.sv[k];
-  });
+  var iss=(d.issues||[]).filter(function(i){return issVisible(i,'infra');});
   var cnt=document.getElementById('i-cnt');
   if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('iss');
-  if(!iss.length){el.innerHTML='<p class="empty">No issues matching current filters.</p>';return;}
-  var rows=iss.map(function(i){
-    var age=i.age?'<span class="mu"> '+esc(i.age)+' ago</span>':'';
-    return '<tr><td class="sv-'+esc(i.severity)+' mono">'+esc(i.severity)+'</td>'+
-           '<td class="mono mu">'+esc(i.check)+'</td>'+
-           '<td class="mono" style="color:var(--blu)">'+esc(i.resource)+'</td>'+
-           '<td>'+esc(i.message)+age+'</td></tr>';
-  });
-  el.innerHTML='<table><thead><tr><th>Severity</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+  if(!iss.length){el.innerHTML='<p class="empty">No issues in the selected window / severity filter.</p>';return;}
+  var rows=iss.map(issRow);
+  el.innerHTML='<table><thead><tr><th>Severity</th><th>Timestamp (UTC)</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
+/* ── render: Odoo checks, grouped by namespace ───────────────────────── */
+function renderOdoo(){
+  var d=st.d; if(!d)return;
+  var iss=(d.issues||[]).filter(function(i){return issVisible(i,'odoo');});
+  var cnt=document.getElementById('odoo-cnt');
+  if(cnt)cnt.textContent='('+iss.length+')';
+  var el=document.getElementById('odoo');
+  if(!iss.length){el.innerHTML='<p class="empty">No Odoo config issues found.</p>';return;}
+  /* group by namespace (resource = "ns/deployment") */
+  var groups={};
+  var order=[];
+  iss.forEach(function(i){
+    var ns=i.resource.indexOf('/')>=0?i.resource.split('/')[0]:i.resource;
+    if(!groups[ns]){groups[ns]=[];order.push(ns);}
+    groups[ns].push(i);
+  });
+  var html='';
+  order.forEach(function(ns){
+    var rows=groups[ns].map(issRow).join('');
+    html+='<div class="ns-group">'+
+      '<div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
+      '<table><thead><tr><th>Severity</th><th>Timestamp</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table></div>';
+  });
+  el.innerHTML=html;
+}
+
+/* ── render: K8s events, grouped by namespace ─────────────────────────── */
+function renderKevt(allIssues){
+  var iss=(allIssues||[]).filter(function(i){return issVisible(i,'event');});
+  var cnt=document.getElementById('ke-cnt');
+  if(cnt)cnt.textContent='('+iss.length+')';
+  var el=document.getElementById('kevt');
+  if(!iss.length){el.innerHTML='<p class="empty">No K8s events in the selected window.</p>';return;}
+  /* group by namespace — resource is "kind/name" but we need ns from check = "Event:Reason" and resource field.
+     The resource field for events is formatted as "Kind/name" within a namespace.
+     We use the issue itself — namespace is embedded as the first component of resource when it contains '/'.
+     For K8s events the resource is set to "ns/kind/name" or "kind/name" depending on the check.
+     To be safe, extract the namespace from resource if it looks like "ns/..." else use "cluster-scoped". */
+  var groups={};
+  var order=[];
+  iss.forEach(function(i){
+    var parts=i.resource.split('/');
+    /* heuristic: if first segment has no uppercase letters and isn't "Node", treat as namespace */
+    var ns=(parts.length>=2&&parts[0]&&!/[A-Z]/.test(parts[0][0]))?parts[0]:'cluster-scoped';
+    if(!groups[ns]){groups[ns]=[];order.push(ns);}
+    groups[ns].push(i);
+  });
+  var html='';
+  order.sort().forEach(function(ns){
+    var rows=groups[ns].map(issRow).join('');
+    html+='<div class="ns-group">'+
+      '<div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
+      '<table><thead><tr><th>Severity</th><th>Timestamp</th><th>Event</th><th>Resource</th><th>Message</th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table></div>';
+  });
+  el.innerHTML=html;
+}
+
+/* ── render: nodes table ─────────────────────────────────────────────── */
 function renderNodes(nodes){
   var el=document.getElementById('nds');
   if(!nodes||!nodes.length){el.innerHTML='<p class="empty">No node data.</p>';return;}
   var rows=nodes.map(function(n){
     var st2=n.ready?'<span class="rdy">&#10003; Ready</span>':'<span class="nrdy">&#10007; NotReady</span>';
     var p=[];
-    if(n.disk_pressure)p.push('<span class="mu" title="DiskPressure">&#128190;</span>');
-    if(n.mem_pressure) p.push('<span class="mu" title="MemoryPressure">&#129504;</span>');
-    if(n.pid_pressure) p.push('<span class="mu" title="PIDPressure">&#9888;</span>');
-    var cpu=n.cpu_alloc_m?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+'c':n.cpu_alloc_m+'m'):'—';
-    var mem=n.mem_alloc_mi?(n.mem_alloc_mi/1024).toFixed(1)+' Gi':'—';
-    return '<tr><td class="mono">'+esc(n.name)+'</td>'+
-           '<td>'+st2+(p.length?' '+p.join(' '):'')+'</td>'+
-           '<td class="mono mu">'+cpu+'</td>'+
-           '<td class="mono mu">'+mem+'</td>'+
-           '<td class="mono mu">'+esc(n.age||'—')+'</td></tr>';
+    if(n.disk_pressure)p.push('<span style="color:var(--red)" title="DiskPressure">&#128190;Disk</span>');
+    if(n.mem_pressure) p.push('<span style="color:var(--yel)" title="MemoryPressure">&#129504;Mem</span>');
+    if(n.pid_pressure) p.push('<span style="color:var(--yel)" title="PIDPressure">&#9888;PID</span>');
+    var cpu=(n.cpu_alloc_m!=null&&n.cpu_alloc_m!==0)
+      ?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+' vCPU':n.cpu_alloc_m+' m')
+      :'—';
+    var mem=(n.mem_alloc_mi!=null&&n.mem_alloc_mi!==0)
+      ?(n.mem_alloc_mi/1024).toFixed(1)+' Gi'
+      :'—';
+    return '<tr>'+
+      '<td class="mono">'+esc(n.name)+'</td>'+
+      '<td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
+      '<td class="mono mu">'+cpu+'</td>'+
+      '<td class="mono mu">'+mem+'</td>'+
+      '<td class="mono mu">'+esc(n.age||'—')+'</td>'+
+      '</tr>';
   });
   el.innerHTML='<table><thead><tr><th>Node</th><th>Status</th><th>CPU Alloc</th><th>RAM Alloc</th><th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
+/* ── render: node scaling events ─────────────────────────────────────── */
 function renderNE(evts){
   var el=document.getElementById('nevt');
   var cnt=document.getElementById('ne-cnt');
@@ -1028,19 +1153,24 @@ function renderNE(evts){
   var rows=evts.slice().reverse().map(function(e){
     var cls=EM[e.type]||'';
     var ic=IC[e.type]||'&#8226;';
-    return '<tr><td class="mono mu">'+esc(fmtTs(e.ts))+'</td>'+
-           '<td class="'+cls+'">'+ic+' '+esc(e.type)+'</td>'+
-           '<td class="mono">'+esc(e.node)+'</td>'+
-           '<td class="mono mu">'+esc(e.detail||'')+'</td></tr>';
+    return '<tr>'+
+      '<td class="mono mu" style="white-space:nowrap">'+esc(fmtTs(e.ts))+'</td>'+
+      '<td class="'+cls+'">'+ic+' '+esc(e.type)+'</td>'+
+      '<td class="mono">'+esc(e.node)+'</td>'+
+      '<td class="mono mu">'+esc(e.detail||'')+'</td>'+
+      '</tr>';
   });
   el.innerHTML='<table><thead><tr><th>Time (UTC)</th><th>Event</th><th>Node</th><th>Detail</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
+/* ── main fetch ──────────────────────────────────────────────────────── */
 function fetchAll(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(d){
     st.d=d;
     renderCards(d);
     renderIss();
+    renderOdoo();
+    renderKevt(d.issues);
     renderNodes(d.nodes_overview);
     document.getElementById('eb').style.display='none';
   }).catch(function(e){
@@ -1048,14 +1178,14 @@ function fetchAll(){
     eb.textContent='Failed to fetch /api/status: '+e;
     eb.style.display='block';
   });
-  fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(renderNE).catch(function(){});
+  fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
 }
 
+/* ── progress bar + auto-refresh ─────────────────────────────────────── */
 function tick(){
   _el++;
-  var pct=(_el/RSEC)*100;
   var rp=document.getElementById('rp');
-  if(rp)rp.style.width=Math.min(pct,100)+'%';
+  if(rp)rp.style.width=Math.min(_el/RSEC*100,100)+'%';
   if(_el>=RSEC){fetchAll();_el=0;if(rp)rp.style.width='0%';}
 }
 
@@ -1373,12 +1503,16 @@ def node_overview(node_items: list) -> List[Dict]:
         if mem_p:  flags.append(f"{R}MemPressure{RS}")
         if pid_p:  flags.append(f"{Y}PIDPressure{RS}")
         rows.append({
-            "name":   name,
-            "ready":  ready,
-            "flags":  flags,
-            "cpu_m":  _cpu(alloc.get("cpu", "0")),
-            "mem_mi": _mem(alloc.get("memory", "0")),
-            "age":    _age(created),
+            "name":         name,
+            "ready":        ready,
+            "disk_pressure": disk_p,
+            "mem_pressure":  mem_p,
+            "pid_pressure":  pid_p,
+            "cpu_alloc_m":  _cpu(alloc.get("cpu", "0")),
+            "mem_alloc_mi": _mem(alloc.get("memory", "0")),
+            "age":          _age(created),
+            # CLI-only: ANSI-coloured flag strings for print_report
+            "_flags":       flags,
         })
     return rows
 
@@ -2668,6 +2802,23 @@ def run_all_checks() -> Tuple[Dict[str, Any], float]:
     del pod_items
     gc.collect()
 
+    # ── Enrich issues: backfill action from _REC, tag Odoo issues ─────────────
+    _ODOO_CHECK_NAMES = {
+        "OdooConfigNotFound",  "OdooHardExceedsK8sLimit", "OdooHardTooCloseToLimit",
+        "OdooHardRatioLow",    "OdooSoftExceedsHard",     "OdooSoftExceedsRequest",
+        "OdooSoftRatioLow",    "WorkersMissing",           "WorkerCountMismatch",
+        "HpaNotFound",         "HpaMaxTooLow",             "HpaMemoryMisaligned",
+        "HpaCpuTargetHigh",    "HpaScaleDownFast",         "LimitRequestTooLow",
+        "LimitTimeMissing",    "LogfileEnabled",
+    }
+    for iss in all_issues:
+        if "action" not in iss:
+            rec = _REC.get(iss["check"])
+            if rec:
+                iss["action"] = rec["immediate"]
+        if iss["check"] in _ODOO_CHECK_NAMES:
+            iss["odoo"] = True
+
     all_issues.sort(key=lambda x: _SEV_ORDER.get(x.get("severity", "INFO"), 3))
 
     summary = {
@@ -2732,9 +2883,9 @@ def print_report(report: Dict[str, Any]):
     for nd in nodes:
         name   = nd["name"].ljust(15)
         status = f"{G}Ready{RS}  " if nd["ready"] else f"{R}NOT READY{RS}"
-        cpu    = f"cpu:{nd['cpu_m']}m"
-        mem    = f"mem:{nd['mem_mi']}Mi"
-        flags  = ("  " + "  ".join(nd["flags"])) if nd["flags"] else ""
+        cpu    = f"cpu:{nd['cpu_alloc_m']}m"
+        mem    = f"mem:{nd['mem_alloc_mi']}Mi"
+        flags  = ("  " + "  ".join(nd["_flags"])) if nd.get("_flags") else ""
         print(f"  {name} {status} │ {DM}{cpu:12}{RS} │ {DM}{mem:16}{RS} │ {DM}age:{nd['age']}{RS}{flags}")
 
     # ── Issues ─────────────────────────────────────────────────────────────────
