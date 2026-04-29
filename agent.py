@@ -835,6 +835,190 @@ _node_watcher = NodeWatcher(poll_interval=60)
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
+# ║  METRICS COLLECTOR  — live resource data via metrics-server      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+class MetricsCollector:
+    """Polls Kubernetes Metrics Server (metrics.k8s.io) every poll_interval seconds.
+
+    Collects per-namespace real CPU/memory usage (pod metrics), per-node real
+    usage vs. allocatable, and cluster-wide real/requests/limits summaries.
+
+    Stores a rolling 24-hour time-series of namespace-level snapshots.
+    Degrades gracefully when metrics-server is not installed — returns empty
+    data and sets available=False rather than raising.
+    """
+    MAX_AGE_HOURS = 24
+    MAX_SNAPS     = 300
+
+    def __init__(self, poll_interval: int = 60):
+        self._lock              = threading.Lock()
+        self._ns_snaps: deque   = deque()   # [{ts, cpu:{ns→m}, mem:{ns→mi}}]
+        self._node_snap: List   = []        # current per-node metrics
+        self._global_snap: Dict = {}        # current cluster-wide summary
+        self._available         = False     # True after first successful poll
+        self._poll_interval     = poll_interval
+        self._custom            = None      # cached CustomObjectsApi
+        self._core_m            = None      # cached CoreV1Api (metrics client)
+
+    def start(self) -> None:
+        t = threading.Thread(target=self._run, name="metrics-collector", daemon=True)
+        t.start()
+
+    def _get_clients(self):
+        if self._custom is None:
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+            self._custom = client.CustomObjectsApi()
+            self._core_m = client.CoreV1Api()
+        return self._custom, self._core_m
+
+    def _run(self) -> None:
+        while True:
+            try:
+                self._poll()
+            except ApiException as e:
+                if e.status in (404, 503):
+                    logging.info("MetricsCollector: metrics-server not available (HTTP %s)", e.status)
+                else:
+                    logging.debug("MetricsCollector API error: %s", e)
+                self._custom = None
+            except Exception as e:
+                logging.debug("MetricsCollector poll error: %s", e)
+                self._custom = None
+            time.sleep(self._poll_interval)
+
+    def _poll(self) -> None:
+        custom, core = self._get_clients()
+
+        # ── Node allocatable capacity ────────────────────────────────────
+        node_alloc: Dict[str, Dict] = {}
+        total_cpu_alloc_m  = 0
+        total_mem_alloc_mi = 0
+        try:
+            for n in core.list_node(limit=100).items:
+                alloc = n.status.allocatable or {}
+                cm    = _cpu(alloc.get("cpu", "0"))
+                mm    = _mem(alloc.get("memory", "0"))
+                node_alloc[n.metadata.name] = {"cpu_m": cm, "mem_mi": mm}
+                total_cpu_alloc_m  += cm
+                total_mem_alloc_mi += mm
+        except Exception:
+            pass
+
+        # ── Node real usage (metrics-server) ────────────────────────────
+        node_snap: List[Dict] = []
+        total_cpu_real_m  = 0
+        total_mem_real_mi = 0
+        nm = custom.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "nodes")
+        for item in nm.get("items", []):
+            name   = item["metadata"]["name"]
+            usage  = item.get("usage", {})
+            cpu_m  = _cpu(usage.get("cpu", "0"))
+            mem_mi = _mem(usage.get("memory", "0"))
+            alloc  = node_alloc.get(name, {})
+            ca, ma = alloc.get("cpu_m", 0), alloc.get("mem_mi", 0)
+            total_cpu_real_m  += cpu_m
+            total_mem_real_mi += mem_mi
+            node_snap.append({
+                "name":         name,
+                "cpu_m":        cpu_m,
+                "cpu_alloc_m":  ca,
+                "cpu_pct":      round(cpu_m / ca * 100, 1) if ca else 0.0,
+                "mem_mi":       mem_mi,
+                "mem_alloc_mi": ma,
+                "mem_pct":      round(mem_mi / ma * 100, 1) if ma else 0.0,
+            })
+
+        # ── Pod real usage per namespace (metrics-server) ────────────────
+        ns_cpu_real: Dict[str, int] = {}
+        ns_mem_real: Dict[str, int] = {}
+        pm = custom.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "pods")
+        for item in pm.get("items", []):
+            ns = item["metadata"]["namespace"]
+            for c in item.get("containers", []):
+                u = c.get("usage", {})
+                ns_cpu_real[ns] = ns_cpu_real.get(ns, 0) + _cpu(u.get("cpu", "0"))
+                ns_mem_real[ns] = ns_mem_real.get(ns, 0) + _mem(u.get("memory", "0"))
+
+        # ── Pod requests + limits from pod specs ─────────────────────────
+        total_cpu_req_m  = 0
+        total_mem_req_mi = 0
+        total_cpu_lim_m  = 0
+        total_mem_lim_mi = 0
+        try:
+            for pod in core.list_pod_for_all_namespaces(limit=500).items:
+                if (pod.status.phase or "") not in ("Running", "Pending"):
+                    continue
+                for c in (pod.spec.containers or []):
+                    res  = c.resources or type("R", (), {"requests": None, "limits": None})()
+                    reqs = res.requests or {}
+                    lims = res.limits   or {}
+                    total_cpu_req_m  += _cpu(reqs.get("cpu",    "0"))
+                    total_mem_req_mi += _mem(reqs.get("memory", "0"))
+                    total_cpu_lim_m  += _cpu(lims.get("cpu",    "0"))
+                    total_mem_lim_mi += _mem(lims.get("memory", "0"))
+        except Exception:
+            pass
+
+        ts     = _now().isoformat()
+        cutoff = (_now() - timedelta(hours=self.MAX_AGE_HOURS)).isoformat()
+
+        def _pct(num, denom):
+            return round(num / denom * 100, 2) if denom else 0.0
+
+        global_snap = {
+            "ts":           ts,
+            "cpu_alloc_m":  total_cpu_alloc_m,
+            "mem_alloc_mi": total_mem_alloc_mi,
+            "cpu_real_m":   total_cpu_real_m,
+            "cpu_req_m":    total_cpu_req_m,
+            "cpu_lim_m":    total_cpu_lim_m,
+            "mem_real_mi":  total_mem_real_mi,
+            "mem_req_mi":   total_mem_req_mi,
+            "mem_lim_mi":   total_mem_lim_mi,
+            "cpu_real_pct": _pct(total_cpu_real_m,  total_cpu_alloc_m),
+            "cpu_req_pct":  _pct(total_cpu_req_m,   total_cpu_alloc_m),
+            "cpu_lim_pct":  _pct(total_cpu_lim_m,   total_cpu_alloc_m),
+            "mem_real_pct": _pct(total_mem_real_mi,  total_mem_alloc_mi),
+            "mem_req_pct":  _pct(total_mem_req_mi,   total_mem_alloc_mi),
+            "mem_lim_pct":  _pct(total_mem_lim_mi,   total_mem_alloc_mi),
+        }
+
+        with self._lock:
+            self._node_snap   = node_snap
+            self._global_snap = global_snap
+            self._available   = True
+            self._ns_snaps.append({"ts": ts, "cpu": dict(ns_cpu_real), "mem": dict(ns_mem_real)})
+            while self._ns_snaps and self._ns_snaps[0]["ts"] < cutoff:
+                self._ns_snaps.popleft()
+            while len(self._ns_snaps) > self.MAX_SNAPS:
+                self._ns_snaps.popleft()
+
+    def ns_history(self, hours: float = 1.0) -> List[Dict]:
+        cutoff = (_now() - timedelta(hours=hours)).isoformat()
+        with self._lock:
+            return [s for s in self._ns_snaps if s["ts"] >= cutoff]
+
+    def node_current(self) -> List[Dict]:
+        with self._lock:
+            return list(self._node_snap)
+
+    def global_current(self) -> Dict:
+        with self._lock:
+            return dict(self._global_snap)
+
+    def available(self) -> bool:
+        with self._lock:
+            return bool(self._available)
+
+
+_metrics_collector = MetricsCollector(poll_interval=60)
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
 # ║  WEB UI  — self-contained dashboard served at /                  ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -906,6 +1090,32 @@ tr:hover td{background:var(--bg3);}
 .rec{margin-top:4px;padding:4px 8px;background:rgba(88,166,255,.07);border-left:2px solid var(--blu);
      color:var(--mu);font-size:11px;border-radius:0 3px 3px 0;}
 .rec-lbl{color:var(--blu);font-weight:600;font-size:10px;text-transform:uppercase;margin-right:4px;}
+/* ── Resource utilization ──────────────────────────────────────────── */
+.res-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;}
+@media(max-width:600px){.res-grid{grid-template-columns:1fr;}}
+.res-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:14px 16px;}
+.rc-title{font-size:11px;font-weight:700;color:var(--tx);margin-bottom:10px;text-transform:uppercase;letter-spacing:.07em;}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+.bar-lbl{width:62px;font-size:11px;color:var(--mu);text-align:right;flex-shrink:0;}
+.bar-segs{display:flex;gap:2px;flex:1;}
+.seg{height:12px;flex:1;background:#1c2128;border-radius:1px;}
+.bar-val{min-width:58px;font-size:13px;font-weight:700;text-align:right;flex-shrink:0;}
+/* ── Node resource bars ────────────────────────────────────────────── */
+.nbar-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #1c2128;}
+.nbar-name{width:160px;font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;}
+.nbar-cap{font-size:9px;color:var(--mu);}
+.nbar-metrics{flex:1;display:flex;flex-direction:column;gap:4px;}
+.nbar-line{display:flex;align-items:center;gap:6px;}
+.nbar-lbl{width:28px;font-size:9px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;text-align:right;flex-shrink:0;}
+.nbar-val{min-width:44px;font-size:11px;font-weight:700;text-align:right;flex-shrink:0;}
+/* ── SVG charts ────────────────────────────────────────────────────── */
+.chart-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:12px 14px;margin-bottom:12px;}
+.chart-title{font-size:11px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px;}
+.chart-inner{width:100%;overflow:hidden;}
+.chart-legend{padding:6px 0 0;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;}
+.chart-legend span{display:inline-flex;align-items:center;gap:4px;}
+.res-unavail{color:var(--yel);background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.25);
+             border-radius:6px;padding:8px 14px;font-size:12px;margin-bottom:12px;display:none;}
 </style>
 </head>
 <body>
@@ -931,43 +1141,91 @@ tr:hover td{background:var(--bg3);}
   <button class="btn sev-W on" id="sb-W" onclick="togS('W')">&#128993; Warning</button>
   <button class="btn sev-I on" id="sb-I" onclick="togS('I')">&#8505;&#65039; Info</button>
 </div>
-<!-- ── Issues ──────────────────────────────────────────────────────────── -->
+
+<!-- ── Resource Utilization ───────────────────────────────────────── -->
+<section>
+  <h2>&#128202; Resource Utilization</h2>
+  <div id="res-unavail" class="res-unavail">
+    &#9888;&#65039; metrics-server not available &mdash; install it for live CPU/RAM data.
+  </div>
+  <!-- Global CPU + RAM bars (Real / Requests / Limits) -->
+  <div class="res-grid" id="global-bars"></div>
+  <!-- Per-node CPU + RAM progress bars -->
+  <div id="node-bars"></div>
+  <!-- Namespace CPU time-series chart -->
+  <div class="chart-card">
+    <div class="chart-title">CPU Utilization by Namespace</div>
+    <div class="chart-inner" id="cpu-chart"></div>
+    <div class="chart-legend" id="cpu-legend"></div>
+  </div>
+  <!-- Namespace Memory time-series chart -->
+  <div class="chart-card">
+    <div class="chart-title">Memory Utilization by Namespace</div>
+    <div class="chart-inner" id="mem-chart"></div>
+    <div class="chart-legend" id="mem-legend"></div>
+  </div>
+</section>
+
+<!-- ── Issues ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
   <div id="iss"></div>
 </section>
-<!-- ── Odoo Config Checks ─────────────────────────────────────────────── -->
+<!-- ── Odoo Config Checks ─────────────────────────────────────────── -->
 <section>
   <h2>&#128336; Odoo Config Checks <span class="cnt" id="odoo-cnt"></span></h2>
   <div id="odoo"></div>
 </section>
-<!-- ── Nodes ──────────────────────────────────────────────────────────── -->
+<!-- ── Nodes ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#128736; Nodes</h2>
   <div id="nds"></div>
 </section>
-<!-- ── K8s Events by namespace ────────────────────────────────────────── -->
+<!-- ── K8s Events by Namespace ────────────────────────────────────── -->
 <section>
   <h2>&#128203; K8s Events by Namespace <span class="cnt" id="ke-cnt"></span></h2>
   <div id="kevt"></div>
 </section>
-<!-- ── Node Scaling Events ────────────────────────────────────────────── -->
+<!-- ── Node Scaling Events ────────────────────────────────────────── -->
 <section>
   <h2>&#128200; Node Scaling &amp; Status Events <span class="cnt" id="ne-cnt"></span></h2>
   <div id="nevt"></div>
 </section>
+
 <script>
 var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[]};
 var RSEC=60,_el=0;
 
-/* ── helpers ──────────────────────────────────────────────────────────── */
+/* ── utilities ────────────────────────────────────────────────────── */
 function esc(v){return String(v===null||v===undefined?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function fmtTs(ts){return ts?ts.substring(0,19).replace('T',' ')+' UTC':'';}
-function cutoff(){
-  var now=new Date();
-  now.setTime(now.getTime()-st.h*3600000);
-  return now.toISOString().substring(0,19);   /* YYYY-MM-DDTHH:MM:SS */
+function cutoff(){var now=new Date();now.setTime(now.getTime()-st.h*3600000);return now.toISOString().substring(0,19);}
+
+/* ── gradient helpers ─────────────────────────────────────────────── */
+function lerp(a,b,t){return a+(b-a)*t;}
+function gradColor(t){
+  var r,g,b;
+  if(t<0.5){var u=t*2;r=lerp(63,227,u);g=lerp(185,179,u);b=lerp(80,65,u);}
+  else{var u=(t-0.5)*2;r=lerp(227,248,u);g=lerp(179,81,u);b=lerp(65,73,u);}
+  return 'rgb('+Math.round(r)+','+Math.round(g)+','+Math.round(b)+')';}
+function valCol(pct){return pct>90?'var(--red)':pct>70?'var(--yel)':'var(--grn)';}
+function makeBar(pct,segs){
+  segs=segs||16;
+  var fill=Math.min(pct/100,1.5);
+  var filled=Math.round(fill*segs);
+  var h='';
+  for(var i=0;i<segs;i++){
+    if(i<filled)h+='<span class="seg" style="background:'+gradColor(Math.min(i/(segs-1),1))+'"></span>';
+    else h+='<span class="seg"></span>';
+  }
+  return h;
 }
+
+/* ── CPU / Mem formatters ─────────────────────────────────────────── */
+function fmtCpuM(m){return m>=1000?(m/1000).toFixed(3).replace(/\.?0+$/,'')+' c':m+' m';}
+function fmtCpuTick(m){return m>=1000?(m/1000).toFixed(1)+'c':m+'m';}
+function fmtMemGi(mi){return (mi/1024).toFixed(2)+' Gi';}
+function fmtMemTick(mi){return mi>=1024?(mi/1024).toFixed(1)+'Gi':Math.round(mi)+'Mi';}
 
 /* ── window / severity filters ──────────────────────────────────────── */
 function setH(h){
@@ -975,50 +1233,37 @@ function setH(h){
   ['h0','h1','h3','h6','h12','h24'].forEach(function(id){document.getElementById(id).classList.remove('on');});
   var m={0.25:'h0',1:'h1',3:'h3',6:'h6',12:'h12',24:'h24'};
   if(m[h])document.getElementById(m[h]).classList.add('on');
-  /* re-render everything that uses the time window */
-  renderIss();
-  renderOdoo();
-  renderKevt(st.d?st.d.issues:[]);
+  renderIss();renderOdoo();renderKevt(st.d?st.d.issues:[]);
   fetch('/api/node-events?hours='+h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
+  fetch('/api/ns-metrics?hours='+h).then(function(r){return r.json();}).then(renderMetrics).catch(function(){});
 }
 function togS(s){
   st.sv[s]=st.sv[s]?0:1;
   var b=document.getElementById('sb-'+s);
   if(b){b.classList.toggle('on',!!st.sv[s]);}
-  renderIss();
-  renderOdoo();
-  renderKevt(st.d?st.d.issues:[]);
+  renderIss();renderOdoo();renderKevt(st.d?st.d.issues:[]);
 }
 
-/* ── shared issue filter ─────────────────────────────────────────────── */
+/* ── issue filter helpers ─────────────────────────────────────────── */
 var SV_MAP={CRITICAL:'C',WARNING:'W',INFO:'I'};
-function issInWindow(i){
-  /* issues with a ts are time-stamped events → apply window filter.
-     issues without a ts are "current state" checks → always show. */
-  if(!i.ts) return true;
-  return i.ts.substring(0,19)>=cutoff();
-}
+function issInWindow(i){if(!i.ts)return true;return i.ts.substring(0,19)>=cutoff();}
 function issVisible(i,section){
-  /* section: 'infra' | 'odoo' | 'event' */
   var isEvent=i.check.startsWith('Event:');
   var isOdoo=!!i.odoo;
-  if(section==='infra'  && (isEvent||isOdoo)) return false;
-  if(section==='odoo'   && !isOdoo)           return false;
-  if(section==='event'  && !isEvent)           return false;
+  if(section==='infra'&&(isEvent||isOdoo))return false;
+  if(section==='odoo'&&!isOdoo)return false;
+  if(section==='event'&&!isEvent)return false;
   var k=SV_MAP[i.severity]||'I';
-  if(!st.sv[k]) return false;
+  if(!st.sv[k])return false;
   return issInWindow(i);
 }
 
-/* ── issue row builder ───────────────────────────────────────────────── */
+/* ── issue row builder ────────────────────────────────────────────── */
 function issRow(i){
   var tsCell=i.ts
     ?'<span class="ts-cell">'+esc(fmtTs(i.ts))+'</span>'+(i.age?'<br><span class="mu" style="font-size:10px">'+esc(i.age)+' ago</span>':'')
     :'<span class="cur-state">current state</span>';
-  var recHtml='';
-  if(i.action){
-    recHtml='<div class="rec"><span class="rec-lbl">&#128295; Fix:</span>'+esc(i.action)+'</div>';
-  }
+  var recHtml=i.action?'<div class="rec"><span class="rec-lbl">&#128295; Fix:</span>'+esc(i.action)+'</div>':'';
   return '<tr>'+
     '<td class="sv-'+esc(i.severity)+' mono" style="white-space:nowrap">'+esc(i.severity)+'</td>'+
     '<td class="ts-cell">'+tsCell+'</td>'+
@@ -1028,11 +1273,10 @@ function issRow(i){
     '</tr>';
 }
 
-/* ── render: header cards ─────────────────────────────────────────────── */
+/* ── render: header cards ─────────────────────────────────────────── */
 function renderCards(d){
   var s=d.summary||{};
-  var ok=d.healthy;
-  document.getElementById('sdot').className='sdot '+(ok?'sdot-ok':'sdot-err');
+  document.getElementById('sdot').className='sdot '+(d.healthy?'sdot-ok':'sdot-err');
   document.getElementById('cluster-name').textContent=d.cluster||'—';
   document.getElementById('last-check').textContent='Last check: '+fmtTs(d.checked_at);
   var dur=d.check_duration?d.check_duration.toFixed(1)+'s':'—';
@@ -1044,78 +1288,52 @@ function renderCards(d){
     '<div class="card c-dur"><div class="lbl">Duration</div><div class="val">'+dur+'</div></div>';
 }
 
-/* ── render: infra issues (no events, no odoo) ──────────────────────── */
+/* ── render: infra issues ─────────────────────────────────────────── */
 function renderIss(){
-  var d=st.d; if(!d)return;
+  var d=st.d;if(!d)return;
   var iss=(d.issues||[]).filter(function(i){return issVisible(i,'infra');});
-  var cnt=document.getElementById('i-cnt');
-  if(cnt)cnt.textContent='('+iss.length+')';
+  var cnt=document.getElementById('i-cnt');if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('iss');
   if(!iss.length){el.innerHTML='<p class="empty">No issues in the selected window / severity filter.</p>';return;}
-  var rows=iss.map(issRow);
-  el.innerHTML='<table><thead><tr><th>Severity</th><th>Timestamp (UTC)</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+  el.innerHTML='<table><thead><tr><th>Severity</th><th>Timestamp (UTC)</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+iss.map(issRow).join('')+'</tbody></table>';
 }
 
-/* ── render: Odoo checks, grouped by namespace ───────────────────────── */
+/* ── render: Odoo checks by namespace ────────────────────────────── */
 function renderOdoo(){
-  var d=st.d; if(!d)return;
+  var d=st.d;if(!d)return;
   var iss=(d.issues||[]).filter(function(i){return issVisible(i,'odoo');});
-  var cnt=document.getElementById('odoo-cnt');
-  if(cnt)cnt.textContent='('+iss.length+')';
+  var cnt=document.getElementById('odoo-cnt');if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('odoo');
   if(!iss.length){el.innerHTML='<p class="empty">No Odoo config issues found.</p>';return;}
-  /* group by namespace (resource = "ns/deployment") */
-  var groups={};
-  var order=[];
-  iss.forEach(function(i){
-    var ns=i.resource.indexOf('/')>=0?i.resource.split('/')[0]:i.resource;
-    if(!groups[ns]){groups[ns]=[];order.push(ns);}
-    groups[ns].push(i);
-  });
-  var html='';
-  order.forEach(function(ns){
-    var rows=groups[ns].map(issRow).join('');
-    html+='<div class="ns-group">'+
-      '<div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
+  var groups={},order=[];
+  iss.forEach(function(i){var ns=i.resource.indexOf('/')>=0?i.resource.split('/')[0]:i.resource;if(!groups[ns]){groups[ns]=[];order.push(ns);}groups[ns].push(i);});
+  el.innerHTML=order.map(function(ns){
+    return '<div class="ns-group"><div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
       '<table><thead><tr><th>Severity</th><th>Timestamp</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead>'+
-      '<tbody>'+rows+'</tbody></table></div>';
-  });
-  el.innerHTML=html;
+      '<tbody>'+groups[ns].map(issRow).join('')+'</tbody></table></div>';
+  }).join('');
 }
 
-/* ── render: K8s events, grouped by namespace ─────────────────────────── */
+/* ── render: K8s events by namespace ─────────────────────────────── */
 function renderKevt(allIssues){
   var iss=(allIssues||[]).filter(function(i){return issVisible(i,'event');});
-  var cnt=document.getElementById('ke-cnt');
-  if(cnt)cnt.textContent='('+iss.length+')';
+  var cnt=document.getElementById('ke-cnt');if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('kevt');
   if(!iss.length){el.innerHTML='<p class="empty">No K8s events in the selected window.</p>';return;}
-  /* group by namespace — resource is "kind/name" but we need ns from check = "Event:Reason" and resource field.
-     The resource field for events is formatted as "Kind/name" within a namespace.
-     We use the issue itself — namespace is embedded as the first component of resource when it contains '/'.
-     For K8s events the resource is set to "ns/kind/name" or "kind/name" depending on the check.
-     To be safe, extract the namespace from resource if it looks like "ns/..." else use "cluster-scoped". */
-  var groups={};
-  var order=[];
+  var groups={},order=[];
   iss.forEach(function(i){
     var parts=i.resource.split('/');
-    /* heuristic: if first segment has no uppercase letters and isn't "Node", treat as namespace */
     var ns=(parts.length>=2&&parts[0]&&!/[A-Z]/.test(parts[0][0]))?parts[0]:'cluster-scoped';
-    if(!groups[ns]){groups[ns]=[];order.push(ns);}
-    groups[ns].push(i);
+    if(!groups[ns]){groups[ns]=[];order.push(ns);}groups[ns].push(i);
   });
-  var html='';
-  order.sort().forEach(function(ns){
-    var rows=groups[ns].map(issRow).join('');
-    html+='<div class="ns-group">'+
-      '<div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
+  el.innerHTML=order.sort().map(function(ns){
+    return '<div class="ns-group"><div class="ns-hdr">&#128230; '+esc(ns)+'</div>'+
       '<table><thead><tr><th>Severity</th><th>Timestamp</th><th>Event</th><th>Resource</th><th>Message</th></tr></thead>'+
-      '<tbody>'+rows+'</tbody></table></div>';
-  });
-  el.innerHTML=html;
+      '<tbody>'+groups[ns].map(issRow).join('')+'</tbody></table></div>';
+  }).join('');
 }
 
-/* ── render: nodes table ─────────────────────────────────────────────── */
+/* ── render: nodes table ──────────────────────────────────────────── */
 function renderNodes(nodes){
   var el=document.getElementById('nds');
   if(!nodes||!nodes.length){el.innerHTML='<p class="empty">No node data.</p>';return;}
@@ -1125,76 +1343,187 @@ function renderNodes(nodes){
     if(n.disk_pressure)p.push('<span style="color:var(--red)" title="DiskPressure">&#128190;Disk</span>');
     if(n.mem_pressure) p.push('<span style="color:var(--yel)" title="MemoryPressure">&#129504;Mem</span>');
     if(n.pid_pressure) p.push('<span style="color:var(--yel)" title="PIDPressure">&#9888;PID</span>');
-    var cpu=(n.cpu_alloc_m!=null&&n.cpu_alloc_m!==0)
-      ?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+' vCPU':n.cpu_alloc_m+' m')
-      :'—';
-    var mem=(n.mem_alloc_mi!=null&&n.mem_alloc_mi!==0)
-      ?(n.mem_alloc_mi/1024).toFixed(1)+' Gi'
-      :'—';
-    return '<tr>'+
-      '<td class="mono">'+esc(n.name)+'</td>'+
-      '<td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
-      '<td class="mono mu">'+cpu+'</td>'+
-      '<td class="mono mu">'+mem+'</td>'+
-      '<td class="mono mu">'+esc(n.age||'—')+'</td>'+
-      '</tr>';
+    var cpu=(n.cpu_alloc_m!=null&&n.cpu_alloc_m!==0)?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+' vCPU':n.cpu_alloc_m+' m'):'—';
+    var mem=(n.mem_alloc_mi!=null&&n.mem_alloc_mi!==0)?(n.mem_alloc_mi/1024).toFixed(1)+' Gi':'—';
+    return '<tr><td class="mono">'+esc(n.name)+'</td><td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
+      '<td class="mono mu">'+cpu+'</td><td class="mono mu">'+mem+'</td><td class="mono mu">'+esc(n.age||'—')+'</td></tr>';
   });
   el.innerHTML='<table><thead><tr><th>Node</th><th>Status</th><th>CPU Alloc</th><th>RAM Alloc</th><th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
-/* ── render: node scaling events ─────────────────────────────────────── */
+/* ── render: node scaling events ─────────────────────────────────── */
 function renderNE(evts){
   var el=document.getElementById('nevt');
-  var cnt=document.getElementById('ne-cnt');
-  if(cnt)cnt.textContent='('+((evts||[]).length)+')';
+  var cnt=document.getElementById('ne-cnt');if(cnt)cnt.textContent='('+(evts||[]).length+')';
   if(!evts||!evts.length){el.innerHTML='<p class="empty">No node events in the selected window.</p>';return;}
   var EM={NodeAdded:'ev-A',NodeRemoved:'ev-R',NodeNotReady:'ev-N',NodeRecovered:'ev-V'};
   var IC={NodeAdded:'&#43;',NodeRemoved:'&#8722;',NodeNotReady:'&#9888;',NodeRecovered:'&#10003;'};
   var rows=evts.slice().reverse().map(function(e){
-    var cls=EM[e.type]||'';
-    var ic=IC[e.type]||'&#8226;';
-    return '<tr>'+
-      '<td class="mono mu" style="white-space:nowrap">'+esc(fmtTs(e.ts))+'</td>'+
-      '<td class="'+cls+'">'+ic+' '+esc(e.type)+'</td>'+
-      '<td class="mono">'+esc(e.node)+'</td>'+
-      '<td class="mono mu">'+esc(e.detail||'')+'</td>'+
-      '</tr>';
+    return '<tr><td class="mono mu" style="white-space:nowrap">'+esc(fmtTs(e.ts))+'</td>'+
+      '<td class="'+(EM[e.type]||'')+'">'+( IC[e.type]||'&#8226;')+' '+esc(e.type)+'</td>'+
+      '<td class="mono">'+esc(e.node)+'</td><td class="mono mu">'+esc(e.detail||'')+'</td></tr>';
   });
   el.innerHTML='<table><thead><tr><th>Time (UTC)</th><th>Event</th><th>Node</th><th>Detail</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
-/* ── main fetch ──────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════
+   RESOURCE UTILIZATION SECTION
+   ══════════════════════════════════════════════════════════════════ */
+
+/* render: global CPU + RAM segmented bar cards */
+function renderGlobal(g){
+  var el=document.getElementById('global-bars');
+  if(!g||!g.cpu_alloc_m){el.innerHTML='';return;}
+  function card(title,rows){
+    var h='<div class="res-card"><div class="rc-title">'+title+'</div>';
+    rows.forEach(function(r){
+      h+='<div class="bar-row">'+
+        '<span class="bar-lbl">'+r.lbl+'</span>'+
+        '<span class="bar-segs">'+makeBar(r.pct)+'</span>'+
+        '<span class="bar-val" style="color:'+valCol(r.pct)+'">'+r.val+'</span>'+
+        '</div>';
+    });
+    return h+'</div>';
+  }
+  el.innerHTML=
+    card('Global CPU Usage',[
+      {lbl:'Real',    pct:g.cpu_real_pct, val:(g.cpu_real_m/1000).toFixed(4).replace(/\.?0+$/,'')+' c'},
+      {lbl:'Requests',pct:g.cpu_req_pct,  val:(g.cpu_req_m/1000).toFixed(3).replace(/\.?0+$/,'')+' c'},
+      {lbl:'Limits',  pct:g.cpu_lim_pct,  val:(g.cpu_lim_m/1000).toFixed(2).replace(/\.?0+$/,'')+' c'},
+    ])+
+    card('Global RAM Usage',[
+      {lbl:'Real',    pct:g.mem_real_pct, val:g.mem_real_pct.toFixed(2)+'%'},
+      {lbl:'Requests',pct:g.mem_req_pct,  val:g.mem_req_pct.toFixed(2)+'%'},
+      {lbl:'Limits',  pct:g.mem_lim_pct,  val:g.mem_lim_pct.toFixed(2)+'%'},
+    ]);
+}
+
+/* render: per-node CPU + RAM bars */
+function renderNodeBars(nodes){
+  var el=document.getElementById('node-bars');
+  if(!nodes||!nodes.length){el.innerHTML='';return;}
+  var h='';
+  nodes.forEach(function(n){
+    h+='<div class="nbar-row">'+
+      '<div class="nbar-name">'+esc(n.name)+
+        '<div class="nbar-cap">'+fmtCpuM(n.cpu_alloc_m)+' &nbsp;&#124;&nbsp; '+fmtMemGi(n.mem_alloc_mi)+'</div>'+
+      '</div>'+
+      '<div class="nbar-metrics">'+
+        '<div class="nbar-line"><span class="nbar-lbl">CPU</span>'+
+          '<span class="bar-segs">'+makeBar(n.cpu_pct)+'</span>'+
+          '<span class="nbar-val" style="color:'+valCol(n.cpu_pct)+'">'+n.cpu_pct.toFixed(1)+'%</span></div>'+
+        '<div class="nbar-line"><span class="nbar-lbl">RAM</span>'+
+          '<span class="bar-segs">'+makeBar(n.mem_pct)+'</span>'+
+          '<span class="nbar-val" style="color:'+valCol(n.mem_pct)+'">'+n.mem_pct.toFixed(1)+'%</span></div>'+
+      '</div>'+
+      '</div>';
+  });
+  el.innerHTML='<div style="margin-bottom:12px">'+h+'</div>';
+}
+
+/* render: SVG line chart */
+var NS_PAL=['#58a6ff','#3fb950','#e3b341','#f85149','#d2a8ff','#ffa657',
+            '#79c0ff','#56d364','#ff7b72','#bc8cff','#ffb74d','#39d353',
+            '#a5d6ff','#7ee787','#ffa198','#e2c5ff'];
+
+function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
+  var cEl=document.getElementById(cId),lEl=document.getElementById(lId);
+  if(!cEl)return;
+  if(!snaps||snaps.length<2){
+    cEl.innerHTML='<p class="empty">Collecting data&hellip; chart available after the second sample.</p>';
+    if(lEl)lEl.innerHTML='';return;
+  }
+  var nsSet={};
+  snaps.forEach(function(s){Object.keys(s[field]||{}).forEach(function(ns){nsSet[ns]=1;});});
+  var nsList=Object.keys(nsSet).sort();
+  if(!nsList.length){cEl.innerHTML='<p class="empty">No namespace data.</p>';return;}
+
+  var W=700,H=180,PL=54,PR=12,PT=12,PB=12;
+  var cw=W-PL-PR,ch=H-PT-PB;
+
+  var times=snaps.map(function(s){return new Date(s.ts).getTime();});
+  var t0=times[0],t1=times[times.length-1];if(t1===t0)t1=t0+60000;
+
+  var maxV=0;
+  snaps.forEach(function(s){Object.values(s[field]||{}).forEach(function(v){if(v>maxV)maxV=v;});});
+  if(!maxV)maxV=1;
+
+  function px(t){return PL+(t-t0)/(t1-t0)*cw;}
+  function py(v){return PT+ch*(1-v/maxV);}
+
+  var grid='',yLbls='';
+  for(var i=0;i<=4;i++){
+    var v=maxV*i/4,y=py(v);
+    grid+='<line x1="'+PL+'" y1="'+y.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+y.toFixed(1)+'" stroke="#1c2128" stroke-width="1"/>';
+    yLbls+='<text x="'+(PL-4)+'" y="'+(y+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="#8b949e">'+fmtTick(v)+'</text>';
+  }
+
+  var lines='',stats=[];
+  nsList.forEach(function(ns,idx){
+    var color=NS_PAL[idx%NS_PAL.length];
+    var pts=snaps.map(function(s){return {t:new Date(s.ts).getTime(),v:(s[field][ns]||0)};});
+    var vals=pts.map(function(p){return p.v;});
+    var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
+    var mean=vals.reduce(function(a,b){return a+b;},0)/vals.length;
+    stats.push({ns:ns,color:color,min:mn,max:mx,mean:mean});
+    var d=pts.map(function(p,i){return (i===0?'M':'L')+px(p.t).toFixed(1)+' '+py(p.v).toFixed(1);}).join(' ');
+    lines+='<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round"/>';
+  });
+
+  cEl.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="display:block">'+
+    '<rect width="'+W+'" height="'+H+'" fill="#161b22" rx="4"/>'+
+    grid+yLbls+lines+'</svg>';
+
+  if(lEl){
+    lEl.innerHTML=stats.map(function(s){
+      return '<span><span style="color:'+s.color+'">&#9632;</span>'+
+        '<span style="color:var(--tx)">'+esc(s.ns)+'</span>'+
+        '<span class="mu">&nbsp;min:'+fmtVal(s.min)+'&nbsp;max:'+fmtVal(s.max)+'&nbsp;mean:'+fmtVal(s.mean)+'</span></span>';
+    }).join('');
+  }
+}
+
+/* render: entire resource utilization section */
+function renderMetrics(data){
+  var unavEl=document.getElementById('res-unavail');
+  if(!data||!data.available){
+    if(unavEl)unavEl.style.display='';
+    ['global-bars','node-bars','cpu-chart','mem-chart','cpu-legend','mem-legend']
+      .forEach(function(id){var e=document.getElementById(id);if(e)e.innerHTML='';});
+    return;
+  }
+  if(unavEl)unavEl.style.display='none';
+  renderGlobal(data.global||{});
+  renderNodeBars(data.nodes||[]);
+  drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick);
+  drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick);
+}
+
+/* ── main fetch ───────────────────────────────────────────────────── */
 function fetchAll(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(d){
     st.d=d;
-    renderCards(d);
-    renderIss();
-    renderOdoo();
-    renderKevt(d.issues);
-    renderNodes(d.nodes_overview);
+    renderCards(d);renderIss();renderOdoo();renderKevt(d.issues);renderNodes(d.nodes_overview);
     document.getElementById('eb').style.display='none';
   }).catch(function(e){
-    var eb=document.getElementById('eb');
-    eb.textContent='Failed to fetch /api/status: '+e;
-    eb.style.display='block';
+    var eb=document.getElementById('eb');eb.textContent='Failed to fetch /api/status: '+e;eb.style.display='block';
   });
   fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
+  fetch('/api/ns-metrics?hours='+st.h).then(function(r){return r.json();}).then(renderMetrics).catch(function(){});
 }
 
-/* ── progress bar + auto-refresh ─────────────────────────────────────── */
+/* ── progress bar + auto-refresh ─────────────────────────────────── */
 function tick(){
   _el++;
   var rp=document.getElementById('rp');
   if(rp)rp.style.width=Math.min(_el/RSEC*100,100)+'%';
   if(_el>=RSEC){fetchAll();_el=0;if(rp)rp.style.width='0%';}
 }
-
 fetchAll();
 setInterval(tick,1000);
 </script>
 </body>
-</html>
-"""
+</html>"""
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
@@ -1257,6 +1586,19 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 h = 6.0
             self._serve(json.dumps(_node_watcher.get_events(h), default=str).encode(), "application/json")
 
+        elif path == "/api/ns-metrics":
+            try:
+                h = float(params.get("hours", "1"))
+            except ValueError:
+                h = 1.0
+            body = json.dumps({
+                "available": _metrics_collector.available(),
+                "global":    _metrics_collector.global_current(),
+                "nodes":     _metrics_collector.node_current(),
+                "snaps":     _metrics_collector.ns_history(h),
+            }, default=str).encode()
+            self._serve(body, "application/json")
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -1281,7 +1623,7 @@ def start_web_server():
     print(
         f"[{_now().strftime('%Y-%m-%d %H:%M:%S UTC')}] "
         f"🌐 Web UI on :{HTTP_PORT}  "
-        f"→ /  /health  /api/status  /api/history  /api/node-events"
+        f"→ /  /health  /api/status  /api/history  /api/node-events  /api/ns-metrics"
     )
     return server
 
@@ -3679,6 +4021,7 @@ if __name__ == "__main__":
             # Skip web server — port 8080 may already be held by the running agent
             run_once()
         else:
+            _metrics_collector.start()
             _node_watcher.start()
             start_web_server()
             run_loop()
