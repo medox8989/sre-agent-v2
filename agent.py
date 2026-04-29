@@ -1364,10 +1364,13 @@ function renderNodes(nodes){
       (n.mem_cap_mi ? '<br><span class="mu" style="font-size:10px">total '+fmtM(n.mem_cap_mi)+'</span>' : '')+
       memUsage;
 
-    /* node name cell: IP + instance type badge */
+    /* node name cell: IP + instance type badge with actual capacity */
+    var capStr = (n.cpu_cap_m||n.mem_cap_mi)
+      ? ' &nbsp;&#183;&nbsp; '+fmtC(n.cpu_cap_m)+' / '+fmtM(n.mem_cap_mi)
+      : '';
     var typeTag = n.instance_type
       ? '<br><span style="background:#21262d;border:1px solid #30363d;border-radius:3px;'+
-        'padding:1px 5px;font-size:10px;color:var(--org)">'+esc(n.instance_type)+'</span>'
+        'padding:1px 6px;font-size:10px;color:var(--org)">'+esc(n.instance_type)+capStr+'</span>'
       : '';
     var nameCell = '<span class="mono">'+esc(n.name)+'</span>'+typeTag;
 
@@ -1457,9 +1460,25 @@ function renderNodeBars(nodes){
 }
 
 /* render: SVG line chart */
-var NS_PAL=['#58a6ff','#3fb950','#e3b341','#f85149','#d2a8ff','#ffa657',
-            '#79c0ff','#56d364','#ff7b72','#bc8cff','#ffb74d','#39d353',
-            '#a5d6ff','#7ee787','#ffa198','#e2c5ff'];
+/* Maximally distinct palette — hues spread ~22° apart, alternating light/dark */
+var NS_PAL=[
+  '#e05252', /* 0  red          */
+  '#3ecf8e', /* 1  emerald      */
+  '#4fa3f7', /* 2  sky-blue     */
+  '#f0c040', /* 3  amber        */
+  '#b06bff', /* 4  violet       */
+  '#f97316', /* 5  orange       */
+  '#22d3ee', /* 6  cyan         */
+  '#ec4899', /* 7  pink         */
+  '#84cc16', /* 8  lime         */
+  '#818cf8', /* 9  indigo       */
+  '#facc15', /* 10 yellow       */
+  '#34d399', /* 11 teal         */
+  '#fb7185', /* 12 rose         */
+  '#a78bfa', /* 13 purple       */
+  '#fbbf24', /* 14 gold         */
+  '#60a5fa', /* 15 cornflower   */
+];
 
 function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
   var cEl=document.getElementById(cId),lEl=document.getElementById(lId);
@@ -1473,7 +1492,7 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
   var nsList=Object.keys(nsSet).sort();
   if(!nsList.length){cEl.innerHTML='<p class="empty">No namespace data.</p>';return;}
 
-  var W=700,H=180,PL=54,PR=12,PT=12,PB=12;
+  var W=700,H=200,PL=54,PR=12,PT=12,PB=32;  /* PB=32 reserves space for time axis */
   var cw=W-PL-PR,ch=H-PT-PB;
 
   var times=snaps.map(function(s){return new Date(s.ts).getTime();});
@@ -1486,6 +1505,7 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
   function px(t){return PL+(t-t0)/(t1-t0)*cw;}
   function py(v){return PT+ch*(1-v/maxV);}
 
+  /* Y-axis grid lines + labels */
   var grid='',yLbls='';
   for(var i=0;i<=4;i++){
     var v=maxV*i/4,y=py(v);
@@ -1493,6 +1513,20 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
     yLbls+='<text x="'+(PL-4)+'" y="'+(y+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="#8b949e">'+fmtTick(v)+'</text>';
   }
 
+  /* X-axis: baseline + 6 time ticks with HH:MM labels */
+  var baseY=(PT+ch).toFixed(1);
+  var xAxis='<line x1="'+PL+'" y1="'+baseY+'" x2="'+(W-PR)+'" y2="'+baseY+'" stroke="#30363d" stroke-width="1"/>';
+  var xTicks=6;
+  for(var j=0;j<=xTicks;j++){
+    var tx=PL+cw*j/xTicks;
+    var tt=t0+(t1-t0)*j/xTicks;
+    var d=new Date(tt);
+    var hh=('0'+d.getUTCHours()).slice(-2)+':'+('0'+d.getUTCMinutes()).slice(-2);
+    xAxis+='<line x1="'+tx.toFixed(1)+'" y1="'+baseY+'" x2="'+tx.toFixed(1)+'" y2="'+(Number(baseY)+4).toFixed(1)+'" stroke="#484f58" stroke-width="1"/>';
+    xAxis+='<text x="'+tx.toFixed(1)+'" y="'+(Number(baseY)+14).toFixed(1)+'" text-anchor="middle" font-size="9" fill="#8b949e">'+hh+'</text>';
+  }
+
+  /* Data lines */
   var lines='',stats=[];
   nsList.forEach(function(ns,idx){
     var color=NS_PAL[idx%NS_PAL.length];
@@ -1502,18 +1536,18 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
     var mean=vals.reduce(function(a,b){return a+b;},0)/vals.length;
     stats.push({ns:ns,color:color,min:mn,max:mx,mean:mean});
     var d=pts.map(function(p,i){return (i===0?'M':'L')+px(p.t).toFixed(1)+' '+py(p.v).toFixed(1);}).join(' ');
-    lines+='<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round"/>';
+    lines+='<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.8" stroke-linejoin="round"/>';
   });
 
   cEl.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="display:block">'+
     '<rect width="'+W+'" height="'+H+'" fill="#161b22" rx="4"/>'+
-    grid+yLbls+lines+'</svg>';
+    grid+yLbls+xAxis+lines+'</svg>';
 
   if(lEl){
     lEl.innerHTML=stats.map(function(s){
-      return '<span><span style="color:'+s.color+'">&#9632;</span>'+
+      return '<span><span style="color:'+s.color+';font-size:14px">&#9632;</span> '+
         '<span style="color:var(--tx)">'+esc(s.ns)+'</span>'+
-        '<span class="mu">&nbsp;min:'+fmtVal(s.min)+'&nbsp;max:'+fmtVal(s.max)+'&nbsp;mean:'+fmtVal(s.mean)+'</span></span>';
+        '<span class="mu">&nbsp;min:'+fmtVal(s.min)+'&nbsp;max:'+fmtVal(s.max)+'&nbsp;avg:'+fmtVal(s.mean)+'</span></span>';
     }).join('');
   }
 }
@@ -1829,9 +1863,15 @@ def _age(dt) -> str:
     return f"{s//60}m"
 
 def _ts_full(dt) -> str:
+    """Return ISO-8601 timestamp with T separator so JS string comparison works.
+
+    Format: "YYYY-MM-DDTHH:MM:SS" — no UTC suffix (fmtTs() in the UI appends it).
+    Using space instead of T would break issInWindow() in the browser because
+    ' ' (ASCII 32) < 'T' (ASCII 84), causing all events to be excluded.
+    """
     if not dt: return "?"
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 def _issue(sev, check, ns_name, msg, when=None, age=None, action=None) -> Dict:
     i = {"severity": sev, "check": check, "resource": ns_name, "message": msg}
@@ -1845,8 +1885,16 @@ def _issue(sev, check, ns_name, msg, when=None, age=None, action=None) -> Dict:
     return i
 
 def _cpu(v) -> int:
+    """Parse a Kubernetes CPU quantity to millicores (int).
+
+    Handles all formats emitted by the API and metrics-server:
+      "500m"      → 500  (millicores — pod requests/limits, allocatable)
+      "2"         → 2000 (whole cores — pod limits)
+      "5374238n"  → 5    (nanocores — metrics-server live usage)
+    """
     v = str(v or "0").strip()
     if v.endswith("m"): return int(v[:-1])
+    if v.endswith("n"): return max(1, int(v[:-1]) // 1_000_000)   # nanocores → millicores
     try:    return int(float(v) * 1000)
     except: return 0
 
