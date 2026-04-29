@@ -1193,7 +1193,7 @@ tr:hover td{background:var(--bg3);}
 </section>
 
 <script>
-var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[]};
+var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{}};  /* mn = metrics nodes keyed by name */
 var RSEC=60,_el=0;
 
 /* ── utilities ────────────────────────────────────────────────────── */
@@ -1343,12 +1343,47 @@ function renderNodes(nodes){
     if(n.disk_pressure)p.push('<span style="color:var(--red)" title="DiskPressure">&#128190;Disk</span>');
     if(n.mem_pressure) p.push('<span style="color:var(--yel)" title="MemoryPressure">&#129504;Mem</span>');
     if(n.pid_pressure) p.push('<span style="color:var(--yel)" title="PIDPressure">&#9888;PID</span>');
-    var cpu=(n.cpu_alloc_m!=null&&n.cpu_alloc_m!==0)?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+' vCPU':n.cpu_alloc_m+' m'):'—';
-    var mem=(n.mem_alloc_mi!=null&&n.mem_alloc_mi!==0)?(n.mem_alloc_mi/1024).toFixed(1)+' Gi':'—';
-    return '<tr><td class="mono">'+esc(n.name)+'</td><td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
-      '<td class="mono mu">'+cpu+'</td><td class="mono mu">'+mem+'</td><td class="mono mu">'+esc(n.age||'—')+'</td></tr>';
+    function fmtC(m){return (m!=null&&m!==0)?(m>=1000?(m/1000).toFixed(1)+' c':m+' m'):'—';}
+    function fmtM(mi){return (mi!=null&&mi!==0)?(mi/1024).toFixed(1)+' Gi':'—';}
+
+    /* live usage from MetricsCollector (may be absent if metrics-server not installed) */
+    var mn=st.mn[n.name]||null;
+    function usagePct(pct,val,alloc){
+      if(mn==null)return '';
+      var col=valCol(pct);
+      return '<br><span style="color:'+col+';font-size:11px;font-weight:700">'+pct.toFixed(1)+'%</span>'+
+             '<span class="mu" style="font-size:10px"> used ('+val+')</span>';
+    }
+    var cpuUsage = mn ? usagePct(mn.cpu_pct, fmtC(mn.cpu_m), n.cpu_alloc_m) : '';
+    var memUsage = mn ? usagePct(mn.mem_pct, fmtM(mn.mem_mi), n.mem_alloc_mi) : '';
+
+    var cpuCell = fmtC(n.cpu_alloc_m)+
+      (n.cpu_cap_m ? '<br><span class="mu" style="font-size:10px">total '+fmtC(n.cpu_cap_m)+'</span>' : '')+
+      cpuUsage;
+    var memCell = fmtM(n.mem_alloc_mi)+
+      (n.mem_cap_mi ? '<br><span class="mu" style="font-size:10px">total '+fmtM(n.mem_cap_mi)+'</span>' : '')+
+      memUsage;
+
+    /* node name cell: IP + instance type badge */
+    var typeTag = n.instance_type
+      ? '<br><span style="background:#21262d;border:1px solid #30363d;border-radius:3px;'+
+        'padding:1px 5px;font-size:10px;color:var(--org)">'+esc(n.instance_type)+'</span>'
+      : '';
+    var nameCell = '<span class="mono">'+esc(n.name)+'</span>'+typeTag;
+
+    return '<tr>'+
+      '<td>'+nameCell+'</td>'+
+      '<td>'+st2+(p.length?' &nbsp;'+p.join(' '):'')+'</td>'+
+      '<td class="mono mu">'+cpuCell+'</td>'+
+      '<td class="mono mu">'+memCell+'</td>'+
+      '<td class="mono mu">'+esc(n.age||'—')+'</td>'+
+      '</tr>';
   });
-  el.innerHTML='<table><thead><tr><th>Node</th><th>Status</th><th>CPU Alloc</th><th>RAM Alloc</th><th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+  el.innerHTML='<table><thead><tr>'+
+    '<th>Node / Type</th><th>Status</th>'+
+    '<th>CPU &nbsp;<span class="mu" style="font-weight:400">(alloc / total / used%)</span></th>'+
+    '<th>RAM &nbsp;<span class="mu" style="font-weight:400">(alloc / total / used%)</span></th>'+
+    '<th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
 /* ── render: node scaling events ─────────────────────────────────── */
@@ -1406,7 +1441,7 @@ function renderNodeBars(nodes){
   nodes.forEach(function(n){
     h+='<div class="nbar-row">'+
       '<div class="nbar-name">'+esc(n.name)+
-        '<div class="nbar-cap">'+fmtCpuM(n.cpu_alloc_m)+' &nbsp;&#124;&nbsp; '+fmtMemGi(n.mem_alloc_mi)+'</div>'+
+        '<div class="nbar-cap">alloc '+fmtCpuM(n.cpu_alloc_m)+' / '+fmtMemGi(n.mem_alloc_mi)+'</div>'+
       '</div>'+
       '<div class="nbar-metrics">'+
         '<div class="nbar-line"><span class="nbar-lbl">CPU</span>'+
@@ -1485,6 +1520,10 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
 
 /* render: entire resource utilization section */
 function renderMetrics(data){
+  /* cache node metrics by name for use in renderNodes */
+  st.mn={};
+  if(data&&data.nodes){data.nodes.forEach(function(n){st.mn[n.name]=n;});}
+  renderNodes(st.d?st.d.nodes_overview:[]);   /* re-render nodes table with fresh % */
   var unavEl=document.getElementById('res-unavail');
   if(!data||!data.available){
     if(unavEl)unavEl.style.display='';
@@ -1834,7 +1873,13 @@ def node_overview(node_items: list) -> List[Dict]:
     for node in node_items:
         name    = node.metadata.name
         alloc   = node.status.allocatable or {}
+        cap     = node.status.capacity     or {}
+        labels  = node.metadata.labels    or {}
         created = node.metadata.creation_timestamp
+        instance_type = (
+            labels.get("node.kubernetes.io/instance-type") or
+            labels.get("beta.kubernetes.io/instance-type") or ""
+        )
         conditions = {c.type: c.status for c in (node.status.conditions or [])}
         ready    = conditions.get("Ready") == "True"
         disk_p   = conditions.get("DiskPressure") == "True"
@@ -1852,9 +1897,12 @@ def node_overview(node_items: list) -> List[Dict]:
             "pid_pressure":  pid_p,
             "cpu_alloc_m":  _cpu(alloc.get("cpu", "0")),
             "mem_alloc_mi": _mem(alloc.get("memory", "0")),
-            "age":          _age(created),
+            "cpu_cap_m":      _cpu(cap.get("cpu", "0")),
+            "mem_cap_mi":     _mem(cap.get("memory", "0")),
+            "instance_type":  instance_type,
+            "age":            _age(created),
             # CLI-only: ANSI-coloured flag strings for print_report
-            "_flags":       flags,
+            "_flags":         flags,
         })
     return rows
 
