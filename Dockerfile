@@ -1,4 +1,4 @@
-# SRE Agent — builds a self-contained image with all deps baked in.
+# SRE Agent v4 — self-contained web UI, no Prometheus/Grafana required.
 # Push this to your OCIR registry so nodes never hit Docker Hub rate limits.
 #
 # ── Build & push ──────────────────────────────────────────────────────────────
@@ -8,21 +8,23 @@
 #   #    e.g.              ax39qm2olrf8/oracleidentitycloudservice/you@example.com
 #   docker login jed.ocir.io
 #
-#   # 2. Build
-#   docker build -t jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v1 .
+#   # 2. Build + push (use deploy.sh build, or manually):
+#   docker build -t jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v5 .
+#   docker push  jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v5
 #
-#   # 3. Push
-#   docker push jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v1
+#   # 3. Deploy:
+#   ./deploy.sh          # jamiat (default)
+#   CLUSTER=proptech-lite ./deploy.sh
+#   CLUSTER=awqaf         ./deploy.sh
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-alpine
 
-# Install Python dependencies
+# Install Python dependencies (prometheus_client removed in v4)
 RUN pip install \
       kubernetes==29.0.0 \
       requests==2.31.0 \
-      prometheus_client==0.20.0 \
       --no-cache-dir
 
 # Create non-root user

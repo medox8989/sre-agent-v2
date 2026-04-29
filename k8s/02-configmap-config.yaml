@@ -34,3 +34,10 @@ data:
   # How many Warning events to fetch per check cycle (caps memory usage)
   # Increase if you want deeper event history, decrease for lower memory
   EVENTS_LOOKBACK_HOURS: "2"
+
+  # ── Web UI / Node Watcher ────────────────────────────────────────
+  # How far back the /api/node-events default window looks (hours)
+  SCALING_HISTORY_HOURS: "6"
+
+  # Node watcher poll interval (seconds) — detects add/remove/NotReady
+  # (hard-coded to 60s in NodeWatcher; adjust by recompiling image if needed)

@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-SRE Agent v3 — Kubernetes Cluster Health Monitor
-Prometheus /metrics + Slack alerting + CLI output.
+SRE Agent v4 — Kubernetes Cluster Health Monitor
+Self-contained Web UI + Slack alerting + CLI output.
 
 Run modes:
   python agent.py            # continuous loop (default)
   python agent.py --once     # run once, print, exit
+  python agent.py --events   # event timeline CLI report
+  python agent.py --incidents# scaling incident analysis
+  python agent.py --odoo     # Odoo config health report
 
-Endpoints (port 8080):
-  /metrics   — Prometheus text exposition (scraped by kube-prometheus-stack)
-  /health    — Simple JSON health check (used by Kubernetes liveness probe)
+Web UI (port 8080):
+  /                  — Self-contained cluster health dashboard
+  /health            — JSON health check (used by K8s liveness probe)
+  /api/status        — Latest check result as JSON
+  /api/history       — Historical snapshots (?hours=N, default 1)
+  /api/node-events   — Node scaling/status events (?hours=N, default 6)
 
 Checks:
   Nodes        — Ready/NotReady, DiskPressure, MemoryPressure, PIDPressure
@@ -25,6 +31,8 @@ Checks:
                  high revisionHistoryLimit, no resource requests
   ReplicaSets  — Old 0/0/0 RSes pinning image layers on disk
   Resources    — Memory/CPU limit overcommit per node
+  Security     — Privileged containers, RBAC wildcards, host mounts, hardcoded secrets
+  OdooConfig   — Ladder-of-Limits compliance (hard/soft/workers/HPA)
 """
 
 import gc
@@ -32,23 +40,17 @@ import re
 import sys
 import os
 import time
+import json
 import logging
 import threading
 import http.server
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-
-try:
-    from prometheus_client import (
-        Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST, REGISTRY,
-    )
-    PROMETHEUS_ENABLED = True
-except ImportError:
-    PROMETHEUS_ENABLED = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CLUSTER_NAME         = os.getenv("CLUSTER_NAME",              "k8s-cluster")
@@ -687,300 +689,469 @@ _REC: Dict[str, Dict[str, str]] = {
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  PROMETHEUS METRICS                                              ║
+# ║  DATA STORE  — in-memory ring buffer of check snapshots          ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-if PROMETHEUS_ENABLED:
-    # ── Summary gauges (updated every cycle) ────────────────────────────────
-    _g_critical    = Gauge('sre_critical_issues_total',    'Current CRITICAL issues count')
-    _g_warning     = Gauge('sre_warning_issues_total',     'Current WARNING issues count')
-    _g_info        = Gauge('sre_info_issues_total',        'Current INFO issues count')
-    _g_healthy     = Gauge('sre_cluster_healthy',          '1 = no critical issues, 0 = critical issues present')
-    _g_nodes       = Gauge('sre_nodes_total',              'Total nodes in cluster')
-    _g_nodes_ready = Gauge('sre_nodes_ready',              'Nodes in Ready state')
-    _g_last_check  = Gauge('sre_last_check_timestamp_seconds', 'Unix timestamp of last completed check cycle')
-    _g_duration    = Gauge('sre_check_duration_seconds',   'Duration of last check cycle in seconds')
+class DataStore:
+    """Stores cluster check data in two separate structures to minimise memory:
 
-    # ── Per-check breakdown (bounded cardinality) ────────────────────────────
-    # One time-series per (severity, check_name) pair — grows as new check types appear
-    _g_by_check    = Gauge('sre_issues_by_check',
-                           'Active issue count by severity and check type',
-                           ['severity', 'check'])
+    - _latest   : single full report dict (the most recent cycle, ~50-200 KB)
+    - _history  : lightweight deque of {ts, duration, summary} — no issue lists,
+                  no nodes_overview.  Each entry ≈ 200 bytes.
 
-    # ── Event counters (cumulative — use rate() / increase() in Grafana) ───
-    # Only incremented when a NEW issue appears (not every cycle for persistent ones)
-    _c_evictions   = Counter('sre_evictions_detected_total',   'New Evicted pods detected across all cycles')
-    _c_oomkills    = Counter('sre_oomkills_detected_total',    'New OOMKilled containers detected')
-    _c_crashloops  = Counter('sre_crashloops_detected_total',  'New CrashLoopBackOff pods detected')
-    _c_checks_run  = Counter('sre_check_cycles_total',         'Total check cycles completed')
+    At CHECK_INTERVAL=300s this gives ≤ 288 history entries per 24 h.
+    We also cap at MAX_SNAPS so a fast interval can't blow up memory.
+    """
+    MAX_AGE_HOURS = 24
+    MAX_SNAPS     = 300    # hard cap regardless of interval
 
-    # ── Static recommendation info metric (populated once at startup) ────────
-    # Labels carry the recommendation text for each check type.
-    # Join this with sre_issues_by_check in Grafana to show recommendations
-    # alongside active issues — just like the CLI output.
-    #
-    # PromQL to use in Grafana:
-    #   (sre_issues_by_check > 0) * on(check) group_left(root_cause,immediate,prevent) sre_check_rec_info
-    #
-    _g_rec_info = Gauge('sre_check_rec_info',
-                        'Static recommendation text per check type. '
-                        'Join with sre_issues_by_check on (check) to display in tables.',
-                        ['check', 'root_cause', 'immediate', 'prevent'])
+    def __init__(self):
+        self._lock    = threading.Lock()
+        self._latest: Optional[Dict] = None          # full snapshot: {ts, duration, report}
+        self._history: deque         = deque()        # lightweight: {ts, duration, summary}
 
-    # ── Event-timeline metrics (mirrors --events CLI output) ─────────────────
-    # IMPORTANT: use k8s_namespace (not namespace) to avoid collision with the
-    # Prometheus Kubernetes SD label namespace=<scrape-target-ns>.  If both exist,
-    # Prometheus keeps the SD label as "namespace" and renames the metric label to
-    # "exported_namespace", breaking all Grafana queries.  k8s_namespace is safe.
-    #
-    # sre_namespace_events{k8s_namespace, bucket}
-    # sre_event_by_reason{k8s_namespace, reason, bucket}
-    # sre_event_detail{k8s_namespace,reason,object,kind,message,bucket}
-    _g_ns_events = Gauge('sre_namespace_events',
-                         'Warning events per namespace and time bucket (ACTIVE/RECENT/HISTORY)',
-                         ['k8s_namespace', 'bucket'])
-    _g_reason_events = Gauge('sre_event_by_reason',
-                              'Warning events per namespace, reason, and time bucket',
-                              ['k8s_namespace', 'reason', 'bucket'])
-    _g_event_detail = Gauge('sre_event_detail',
-                             'Full detail for each deduplicated warning event — '
-                             'object, kind, truncated message, bucket, count',
-                             ['k8s_namespace', 'reason', 'object', 'kind', 'message', 'bucket'])
+    def add(self, report: Dict, duration: float) -> None:
+        ts     = _now().isoformat()
+        cutoff = (_now() - timedelta(hours=self.MAX_AGE_HOURS)).isoformat()
+        with self._lock:
+            self._latest = {"ts": ts, "duration": round(duration, 2), "report": report}
+            self._history.append({"ts": ts, "duration": round(duration, 2),
+                                   "summary": report["summary"]})
+            # Trim by age
+            while self._history and self._history[0]["ts"] < cutoff:
+                self._history.popleft()
+            # Trim by count (safety cap)
+            while len(self._history) > self.MAX_SNAPS:
+                self._history.popleft()
 
-    # ── Per-deployment Odoo config issue metric ───────────────────────────────
-    # 1 = active issue, 0 = cleared.  Enables the Odoo Config Health dashboard
-    # to show per-namespace / per-deployment breakdown of ladder-of-limits checks.
-    _g_odoo_issue = Gauge('sre_odoo_issue',
-                          '1 = active Odoo config issue for this deployment, 0 = cleared. '
-                          'Covers memory ladder, workers, HPA, and odoo.conf settings.',
-                          ['check', 'severity', 'k8s_namespace', 'deployment'])
+    def latest(self) -> Optional[Dict]:
+        """Return the most recent full snapshot dict or None."""
+        with self._lock:
+            return self._latest
 
-    def _setup_rec_metrics():
-        """Populate sre_check_rec_info once at process startup — static, never changes."""
-        for chk, rec in _REC.items():
-            _g_rec_info.labels(
-                check=chk,
-                root_cause=rec['root_cause'][:220],
-                immediate=rec['immediate'][:220],
-                prevent=rec['prevent'][:220],
-            ).set(1)
+    def history(self, hours: float = 1.0) -> List[Dict]:
+        """Return lightweight history entries for the last N hours."""
+        cutoff = (_now() - timedelta(hours=hours)).isoformat()
+        with self._lock:
+            return [s for s in self._history if s["ts"] >= cutoff]
 
-    # ── State for deduplicating counter increments ───────────────────────────
-    _prev_issue_keys: Set[Tuple[str, str]] = set()
-    _seen_check_labels: Set[Tuple[str, str]] = set()
-    _seen_ns_event_labels: Set[Tuple[str, str]] = set()
-    _seen_reason_event_labels: Set[Tuple[str, str, str]] = set()
-    _seen_event_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
-    _seen_odoo_issue_labels:   Set[Tuple[str, str, str, str]] = set()
 
-    def update_metrics(report: Dict[str, Any], duration: float) -> None:
-        """Update all Prometheus metrics from the latest report."""
-        global _prev_issue_keys, _seen_check_labels, \
-               _seen_ns_event_labels, _seen_reason_event_labels, _seen_event_detail_labels, \
-               _seen_odoo_issue_labels
-
-        s = report["summary"]
-        _g_critical.set(s["critical"])
-        _g_warning.set(s["warning"])
-        _g_info.set(s["info"])
-        _g_healthy.set(1 if report["healthy"] else 0)
-        _g_nodes.set(len(report["nodes_overview"]))
-        _g_nodes_ready.set(sum(1 for n in report["nodes_overview"] if n["ready"]))
-        _g_last_check.set(time.time())
-        _g_duration.set(duration)
-        _c_checks_run.inc()
-
-        # Rebuild per-check counts and new-issue counters
-        counts: Dict[Tuple[str, str], int] = {}
-        current_keys: Set[Tuple[str, str]] = set()
-
-        for issue in report["issues"]:
-            label_key = (issue["severity"], issue["check"])
-            counts[label_key] = counts.get(label_key, 0) + 1
-
-            resource_key = (issue["check"], issue["resource"])
-            current_keys.add(resource_key)
-
-            # Only count genuinely new issues (not persistent ones from prior cycles)
-            if resource_key not in _prev_issue_keys:
-                chk = issue["check"]
-                if chk == "PodEvicted":
-                    _c_evictions.inc()
-                elif chk == "OOMKilled":
-                    _c_oomkills.inc()
-                elif chk == "CrashLoopBackOff":
-                    _c_crashloops.inc()
-
-        # Set NEW counts FIRST — no zero-window for active issues during Prometheus scrape
-        new_check_labels: Set[Tuple[str, str]] = set()
-        for (sev, chk), cnt in counts.items():
-            _g_by_check.labels(severity=sev, check=chk).set(cnt)
-            new_check_labels.add((sev, chk))
-
-        # THEN zero out only labels that are no longer active this cycle
-        for sev, chk in _seen_check_labels - new_check_labels:
-            _g_by_check.labels(severity=sev, check=chk).set(0)
-
-        _seen_check_labels = new_check_labels
-        _prev_issue_keys = current_keys
-
-        # ── Odoo per-deployment issue metrics ────────────────────────────────
-        _ODOO_CHECKS = {
-            "OdooHardExceedsK8sLimit", "OdooHardTooCloseToLimit", "OdooHardRatioLow",
-            "OdooSoftExceedsHard", "OdooSoftExceedsRequest", "OdooSoftRatioLow",
-            "WorkersMissing", "WorkerCountMismatch",
-            "HpaNotFound", "HpaMemoryMisaligned", "HpaMaxTooLow",
-            "HpaCpuTargetHigh", "HpaScaleDownFast",
-            "LimitRequestTooLow", "LimitTimeMissing", "LogfileEnabled", "OdooConfigNotFound",
-        }
-        new_odoo_labels: Set[Tuple[str, str, str, str]] = set()
-        for issue in report["issues"]:
-            if issue["check"] not in _ODOO_CHECKS:
-                continue
-            res    = issue["resource"]          # "namespace/deployment"
-            parts  = res.split("/", 1)
-            ns_p   = parts[0] if len(parts) == 2 else ""
-            dep_p  = parts[1] if len(parts) == 2 else parts[0]
-            lbl    = (issue["check"], issue["severity"], ns_p, dep_p)
-            _g_odoo_issue.labels(
-                check=lbl[0], severity=lbl[1],
-                k8s_namespace=lbl[2], deployment=lbl[3],
-            ).set(1)
-            new_odoo_labels.add(lbl)
-        for lbl in _seen_odoo_issue_labels - new_odoo_labels:
-            _g_odoo_issue.labels(
-                check=lbl[0], severity=lbl[1],
-                k8s_namespace=lbl[2], deployment=lbl[3],
-            ).set(0)
-        _seen_odoo_issue_labels = new_odoo_labels
-
-        # ── Event-timeline metrics ────────────────────────────────────────────
-        # Aggregate counts from event issues (check starts with "Event:")
-        ns_bucket: Dict[Tuple[str, str], int] = {}
-        reason_bucket: Dict[Tuple[str, str, str], int] = {}
-        # detail key: (ns, reason, object, kind, message_truncated, bucket)
-        detail_bucket: Dict[Tuple[str, str, str, str, str, str], int] = {}
-
-        for iss in report["issues"]:
-            if not iss["check"].startswith("Event:"):
-                continue
-            # resource is "namespace/object", "namespace/kind/object", or just "object"
-            resource = iss.get("resource", "")
-            parts = resource.split("/")
-            ns     = parts[0] if len(parts) >= 2 else resource
-            reason = iss["check"][len("Event:"):]
-            bucket = iss.get("event_bucket", "HISTORY")
-            count  = iss.get("event_count", 1)
-            obj    = iss.get("event_object", parts[-1] if parts else "?")
-            kind   = iss.get("event_kind", "")
-            # Truncate message to 150 chars — keep Prometheus label cardinality bounded
-            msg    = (iss.get("message", ""))[:150]
-
-            ns_bucket[(ns, bucket)]            = ns_bucket.get((ns, bucket), 0) + count
-            reason_bucket[(ns, reason, bucket)] = reason_bucket.get((ns, reason, bucket), 0) + count
-            dk = (ns, reason, obj, kind, msg, bucket)
-            detail_bucket[dk]                  = detail_bucket.get(dk, 0) + count
-
-        # Set new values FIRST — no zero-window during Prometheus scrape
-        new_ns_labels: Set[Tuple[str, str]] = set()
-        for (ns, bucket), cnt in ns_bucket.items():
-            _g_ns_events.labels(k8s_namespace=ns, bucket=bucket).set(cnt)
-            new_ns_labels.add((ns, bucket))
-
-        new_reason_labels: Set[Tuple[str, str, str]] = set()
-        for (ns, reason, bucket), cnt in reason_bucket.items():
-            _g_reason_events.labels(k8s_namespace=ns, reason=reason, bucket=bucket).set(cnt)
-            new_reason_labels.add((ns, reason, bucket))
-
-        new_detail_labels: Set[Tuple[str, str, str, str, str, str]] = set()
-        for (ns, reason, obj, kind, msg, bucket), cnt in detail_bucket.items():
-            _g_event_detail.labels(
-                k8s_namespace=ns, reason=reason, object=obj,
-                kind=kind, message=msg, bucket=bucket
-            ).set(cnt)
-            new_detail_labels.add((ns, reason, obj, kind, msg, bucket))
-
-        # Zero-out labels that are no longer active this cycle
-        for ns, bucket in _seen_ns_event_labels - new_ns_labels:
-            _g_ns_events.labels(k8s_namespace=ns, bucket=bucket).set(0)
-        for ns, reason, bucket in _seen_reason_event_labels - new_reason_labels:
-            _g_reason_events.labels(k8s_namespace=ns, reason=reason, bucket=bucket).set(0)
-        for ns, reason, obj, kind, msg, bucket in _seen_event_detail_labels - new_detail_labels:
-            _g_event_detail.labels(
-                k8s_namespace=ns, reason=reason, object=obj,
-                kind=kind, message=msg, bucket=bucket
-            ).set(0)
-
-        _seen_ns_event_labels     = new_ns_labels
-        _seen_reason_event_labels = new_reason_labels
-        _seen_event_detail_labels = new_detail_labels
-
-    def _noop_setup():
-        pass
-
-else:
-    def update_metrics(report: Dict[str, Any], duration: float) -> None:
-        pass  # no-op if prometheus_client not installed
-    def _setup_rec_metrics():
-        pass
+_data_store = DataStore()
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  HTTP SERVER  (/metrics  +  /health)                             ║
+# ║  NODE WATCHER  — detects node add / remove / NotReady events     ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+class NodeWatcher:
+    """Polls the cluster every poll_interval seconds and logs node state changes.
+
+    The K8s API client is created once on first use and reused for all
+    subsequent polls to avoid repeated config loading overhead.
+    """
+    MAX_AGE_HOURS = 24
+    MAX_EVENTS    = 500   # hard cap on stored events
+
+    def __init__(self, poll_interval: int = 60):
+        self._lock              = threading.Lock()
+        self._events: deque     = deque()
+        self._known: Dict[str, str] = {}   # name → "ready" | "notready"
+        self._poll_interval     = poll_interval
+        self._core              = None     # cached CoreV1Api client
+
+    def start(self) -> None:
+        t = threading.Thread(target=self._run, name="node-watcher", daemon=True)
+        t.start()
+
+    def _run(self) -> None:
+        # First call: seed _known without emitting events (baseline)
+        try:
+            self._seed()
+        except Exception as e:
+            logging.debug(f"NodeWatcher seed: {e}")
+        while True:
+            time.sleep(self._poll_interval)
+            try:
+                self._poll()
+            except Exception as e:
+                logging.debug(f"NodeWatcher poll: {e}")
+                self._core = None   # reset client on error so next poll re-creates it
+
+    def _get_core(self) -> client.CoreV1Api:
+        """Return a cached CoreV1Api client, creating it once on first use."""
+        if self._core is None:
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+            self._core = client.CoreV1Api()
+        return self._core
+
+    def _seed(self) -> None:
+        core  = self._get_core()
+        nodes = core.list_node(limit=100).items
+        with self._lock:
+            for n in nodes:
+                conds = {c.type: c.status for c in (n.status.conditions or [])}
+                self._known[n.metadata.name] = "ready" if conds.get("Ready") == "True" else "notready"
+
+    def _poll(self) -> None:
+        core   = self._get_core()
+        items  = core.list_node(limit=100).items
+        now_s  = _now().isoformat()
+        cutoff = (_now() - timedelta(hours=self.MAX_AGE_HOURS)).isoformat()
+
+        new_known: Dict[str, str] = {}
+        for n in items:
+            conds = {c.type: c.status for c in (n.status.conditions or [])}
+            new_known[n.metadata.name] = "ready" if conds.get("Ready") == "True" else "notready"
+
+        with self._lock:
+            added   = set(new_known) - set(self._known)
+            removed = set(self._known) - set(new_known)
+            changed = {nm for nm in set(new_known) & set(self._known) if new_known[nm] != self._known[nm]}
+
+            for nm in added:
+                self._events.append({"ts": now_s, "node": nm, "type": "NodeAdded",    "detail": new_known[nm]})
+            for nm in removed:
+                self._events.append({"ts": now_s, "node": nm, "type": "NodeRemoved",  "detail": ""})
+            for nm in changed:
+                etype = "NodeNotReady" if new_known[nm] == "notready" else "NodeRecovered"
+                self._events.append({"ts": now_s, "node": nm, "type": etype,           "detail": ""})
+
+            self._known = new_known
+            while self._events and self._events[0]["ts"] < cutoff:
+                self._events.popleft()
+            while len(self._events) > self.MAX_EVENTS:
+                self._events.popleft()
+
+    def get_events(self, hours: float = 6.0) -> List[Dict]:
+        cutoff = (_now() - timedelta(hours=hours)).isoformat()
+        with self._lock:
+            return [e for e in self._events if e["ts"] >= cutoff]
+
+
+_node_watcher = NodeWatcher(poll_interval=60)
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  WEB UI  — self-contained dashboard served at /                  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+_WEB_UI = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRE Agent</title>
+<style>
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bd:#30363d;--tx:#e6edf3;--mu:#8b949e;
+      --red:#f85149;--yel:#e3b341;--blu:#58a6ff;--grn:#3fb950;--pur:#d2a8ff;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--tx);font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;}
+a{color:var(--blu);}
+#rp{height:2px;background:var(--blu);position:fixed;top:0;left:0;transition:width 1s linear;z-index:100;}
+#eb{background:#3d1111;border-bottom:1px solid var(--red);color:var(--red);padding:6px 20px;font-size:12px;display:none;}
+header{background:var(--bg2);border-bottom:1px solid var(--bd);padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+header h1{font-size:15px;font-weight:700;}
+#cluster-name{color:var(--blu);font-weight:600;}
+#last-check{color:var(--mu);font-size:11px;margin-left:auto;}
+.sdot{width:9px;height:9px;border-radius:50%;display:inline-block;}
+.sdot-ok{background:var(--grn);box-shadow:0 0 5px var(--grn);}
+.sdot-err{background:var(--red);box-shadow:0 0 5px var(--red);}
+.cards{display:flex;gap:10px;padding:14px 20px;flex-wrap:wrap;}
+.card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:12px 16px;min-width:100px;}
+.card .lbl{color:var(--mu);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;}
+.card .val{font-size:26px;font-weight:700;line-height:1.1;}
+.c-crit{border-left:3px solid var(--red);}  .c-crit .val{color:var(--red);}
+.c-warn{border-left:3px solid var(--yel);}  .c-warn .val{color:var(--yel);}
+.c-info{border-left:3px solid var(--blu);}  .c-info .val{color:var(--blu);}
+.c-node{border-left:3px solid var(--grn);}  .c-node .val{color:var(--grn);}
+.c-dur {border-left:3px solid var(--pur);}  .c-dur  .val{color:var(--pur);font-size:18px;padding-top:3px;}
+.ctrl{padding:0 20px 10px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.ctrl label{color:var(--mu);font-size:10px;text-transform:uppercase;letter-spacing:.06em;}
+.btn{background:var(--bg3);border:1px solid var(--bd);color:var(--tx);padding:3px 9px;
+     border-radius:4px;cursor:pointer;font-size:12px;transition:background .12s;}
+.btn:hover{background:#2d333b;}
+.btn.on{background:#1f6feb;border-color:#388bfd;color:#fff;}
+.sev-C{color:var(--red);}   .sev-C.on{background:rgba(248,81,73,.15);border-color:var(--red);}
+.sev-W{color:var(--yel);}   .sev-W.on{background:rgba(227,179,65,.15);border-color:var(--yel);}
+.sev-I{color:var(--blu);}   .sev-I.on{background:rgba(88,166,255,.15);border-color:var(--blu);}
+section{padding:0 20px 18px;}
+h2{font-size:11px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;
+   padding:10px 0 5px;border-top:1px solid var(--bd);display:flex;align-items:center;gap:6px;}
+h2 .cnt{font-weight:400;color:var(--mu);}
+table{width:100%;border-collapse:collapse;}
+th{text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;
+   color:var(--mu);border-bottom:1px solid var(--bd);background:var(--bg2);position:sticky;top:0;}
+td{padding:5px 10px;border-bottom:1px solid #1c2128;vertical-align:top;font-size:12px;word-break:break-word;}
+tr:hover td{background:var(--bg3);}
+.sv-CRITICAL{color:var(--red);font-weight:600;}
+.sv-WARNING{color:var(--yel);font-weight:600;}
+.sv-INFO{color:var(--blu);}
+.mono{font-family:monospace;font-size:11px;}
+.mu{color:var(--mu);}
+.rdy{color:var(--grn);}
+.nrdy{color:var(--red);font-weight:600;}
+.ev-A{color:var(--grn);}
+.ev-R{color:var(--red);}
+.ev-N{color:var(--yel);}
+.ev-V{color:var(--grn);}
+.empty{color:var(--mu);font-style:italic;padding:10px 0;font-size:12px;}
+.sp{display:inline-block;width:11px;height:11px;border:2px solid var(--bd);border-top-color:var(--blu);
+    border-radius:50%;animation:spin .7s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+</style>
+</head>
+<body>
+<div id="rp" style="width:0%"></div>
+<div id="eb"></div>
+<header>
+  <h1>&#128269; SRE Agent</h1>
+  <span class="sdot" id="sdot"></span>
+  <span id="cluster-name">&#8203;</span>
+  <span id="last-check">&#8203;</span>
+</header>
+<div class="cards" id="cards"></div>
+<div class="ctrl">
+  <label>History&nbsp;</label>
+  <button class="btn" id="h0" onclick="setH(.25)">15m</button>
+  <button class="btn on" id="h1" onclick="setH(1)">1h</button>
+  <button class="btn" id="h3" onclick="setH(3)">3h</button>
+  <button class="btn" id="h6" onclick="setH(6)">6h</button>
+  <button class="btn" id="h12" onclick="setH(12)">12h</button>
+  <button class="btn" id="h24" onclick="setH(24)">24h</button>
+  &nbsp;
+  <button class="btn sev-C on" id="sb-C" onclick="togS('C')">&#128308; Critical</button>
+  <button class="btn sev-W on" id="sb-W" onclick="togS('W')">&#128993; Warning</button>
+  <button class="btn sev-I on" id="sb-I" onclick="togS('I')">&#8505;&#65039; Info</button>
+</div>
+<section>
+  <h2>Issues <span class="cnt" id="i-cnt"></span></h2>
+  <div id="iss"></div>
+</section>
+<section>
+  <h2>Nodes</h2>
+  <div id="nds"></div>
+</section>
+<section>
+  <h2>Node Scaling &amp; Status Events <span class="cnt" id="ne-cnt"></span></h2>
+  <div id="nevt"></div>
+</section>
+<script>
+var st={h:1,sv:{C:1,W:1,I:1},d:null};
+var RSEC=60,_rt=null,_el=0;
+
+function setH(h){
+  st.h=h;
+  ['h0','h1','h3','h6','h12','h24'].forEach(function(id){document.getElementById(id).classList.remove('on');});
+  var m={0.25:'h0',1:'h1',3:'h3',6:'h6',12:'h12',24:'h24'};
+  if(m[h])document.getElementById(m[h]).classList.add('on');
+  fetch('/api/node-events?hours='+h).then(function(r){return r.json();}).then(renderNE).catch(function(){});
+}
+
+function togS(s){
+  st.sv[s]=st.sv[s]?0:1;
+  var b=document.getElementById('sb-'+s);
+  if(b){b.classList.toggle('on',!!st.sv[s]);}
+  renderIss();
+}
+
+function esc(v){return String(v===null||v===undefined?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function fmtTs(ts){return ts?ts.substring(0,19).replace('T',' ')+' UTC':'';}
+
+function renderCards(d){
+  var s=d.summary||{};
+  var ok=d.healthy;
+  var dot=document.getElementById('sdot');
+  dot.className='sdot '+(ok?'sdot-ok':'sdot-err');
+  document.getElementById('cluster-name').textContent=d.cluster||'—';
+  document.getElementById('last-check').textContent='Last check: '+fmtTs(d.checked_at);
+  var dur=d.check_duration?d.check_duration.toFixed(1)+'s':'—';
+  document.getElementById('cards').innerHTML=
+    '<div class="card c-crit"><div class="lbl">Critical</div><div class="val">'+(s.critical||0)+'</div></div>'+
+    '<div class="card c-warn"><div class="lbl">Warning</div><div class="val">'+(s.warning||0)+'</div></div>'+
+    '<div class="card c-info"><div class="lbl">Info</div><div class="val">'+(s.info||0)+'</div></div>'+
+    '<div class="card c-node"><div class="lbl">Nodes</div><div class="val">'+((d.nodes_overview||[]).length)+'</div></div>'+
+    '<div class="card c-dur"><div class="lbl">Duration</div><div class="val">'+dur+'</div></div>';
+}
+
+function renderIss(){
+  var d=st.d; if(!d)return;
+  var SV_MAP={CRITICAL:'C',WARNING:'W',INFO:'I'};
+  var iss=(d.issues||[]).filter(function(i){
+    var k=SV_MAP[i.severity]||'I';
+    return !i.check.startsWith('Event:')&&st.sv[k];
+  });
+  var cnt=document.getElementById('i-cnt');
+  if(cnt)cnt.textContent='('+iss.length+')';
+  var el=document.getElementById('iss');
+  if(!iss.length){el.innerHTML='<p class="empty">No issues matching current filters.</p>';return;}
+  var rows=iss.map(function(i){
+    var age=i.age?'<span class="mu"> '+esc(i.age)+' ago</span>':'';
+    return '<tr><td class="sv-'+esc(i.severity)+' mono">'+esc(i.severity)+'</td>'+
+           '<td class="mono mu">'+esc(i.check)+'</td>'+
+           '<td class="mono" style="color:var(--blu)">'+esc(i.resource)+'</td>'+
+           '<td>'+esc(i.message)+age+'</td></tr>';
+  });
+  el.innerHTML='<table><thead><tr><th>Severity</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+}
+
+function renderNodes(nodes){
+  var el=document.getElementById('nds');
+  if(!nodes||!nodes.length){el.innerHTML='<p class="empty">No node data.</p>';return;}
+  var rows=nodes.map(function(n){
+    var st2=n.ready?'<span class="rdy">&#10003; Ready</span>':'<span class="nrdy">&#10007; NotReady</span>';
+    var p=[];
+    if(n.disk_pressure)p.push('<span class="mu" title="DiskPressure">&#128190;</span>');
+    if(n.mem_pressure) p.push('<span class="mu" title="MemoryPressure">&#129504;</span>');
+    if(n.pid_pressure) p.push('<span class="mu" title="PIDPressure">&#9888;</span>');
+    var cpu=n.cpu_alloc_m?(n.cpu_alloc_m>=1000?(n.cpu_alloc_m/1000).toFixed(1)+'c':n.cpu_alloc_m+'m'):'—';
+    var mem=n.mem_alloc_mi?(n.mem_alloc_mi/1024).toFixed(1)+' Gi':'—';
+    return '<tr><td class="mono">'+esc(n.name)+'</td>'+
+           '<td>'+st2+(p.length?' '+p.join(' '):'')+'</td>'+
+           '<td class="mono mu">'+cpu+'</td>'+
+           '<td class="mono mu">'+mem+'</td>'+
+           '<td class="mono mu">'+esc(n.age||'—')+'</td></tr>';
+  });
+  el.innerHTML='<table><thead><tr><th>Node</th><th>Status</th><th>CPU Alloc</th><th>RAM Alloc</th><th>Age</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+}
+
+function renderNE(evts){
+  var el=document.getElementById('nevt');
+  var cnt=document.getElementById('ne-cnt');
+  if(cnt)cnt.textContent='('+((evts||[]).length)+')';
+  if(!evts||!evts.length){el.innerHTML='<p class="empty">No node events in the selected window.</p>';return;}
+  var EM={NodeAdded:'ev-A',NodeRemoved:'ev-R',NodeNotReady:'ev-N',NodeRecovered:'ev-V'};
+  var IC={NodeAdded:'&#43;',NodeRemoved:'&#8722;',NodeNotReady:'&#9888;',NodeRecovered:'&#10003;'};
+  var rows=evts.slice().reverse().map(function(e){
+    var cls=EM[e.type]||'';
+    var ic=IC[e.type]||'&#8226;';
+    return '<tr><td class="mono mu">'+esc(fmtTs(e.ts))+'</td>'+
+           '<td class="'+cls+'">'+ic+' '+esc(e.type)+'</td>'+
+           '<td class="mono">'+esc(e.node)+'</td>'+
+           '<td class="mono mu">'+esc(e.detail||'')+'</td></tr>';
+  });
+  el.innerHTML='<table><thead><tr><th>Time (UTC)</th><th>Event</th><th>Node</th><th>Detail</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+}
+
+function fetchAll(){
+  fetch('/api/status').then(function(r){return r.json();}).then(function(d){
+    st.d=d;
+    renderCards(d);
+    renderIss();
+    renderNodes(d.nodes_overview);
+    document.getElementById('eb').style.display='none';
+  }).catch(function(e){
+    var eb=document.getElementById('eb');
+    eb.textContent='Failed to fetch /api/status: '+e;
+    eb.style.display='block';
+  });
+  fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(renderNE).catch(function(){});
+}
+
+function tick(){
+  _el++;
+  var pct=(_el/RSEC)*100;
+  var rp=document.getElementById('rp');
+  if(rp)rp.style.width=Math.min(pct,100)+'%';
+  if(_el>=RSEC){fetchAll();_el=0;if(rp)rp.style.width='0%';}
+}
+
+fetchAll();
+setInterval(tick,1000);
+</script>
+</body>
+</html>
+"""
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  HTTP SERVER  (/  /health  /api/*)                               ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 _agent_start_time = time.time()
-_last_report: Dict[str, Any] = {}
-_last_report_lock = threading.Lock()
 
 
-class _MetricsHandler(http.server.BaseHTTPRequestHandler):
+class _WebHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/metrics":
-            if PROMETHEUS_ENABLED:
-                output = generate_latest()
-                self.send_response(200)
-                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
-                self.end_headers()
-                self.wfile.write(output)
-            else:
-                body = b"# prometheus_client not installed\n"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.end_headers()
-                self.wfile.write(body)
+        raw_path = self.path
+        if "?" in raw_path:
+            path, qs = raw_path.split("?", 1)
+        else:
+            path, qs = raw_path, ""
+        params: Dict[str, str] = {}
+        for part in qs.split("&"):
+            if "=" in part:
+                k, _, v = part.partition("=")
+                params[k] = v
 
-        elif self.path in ("/health", "/healthz", "/"):
-            with _last_report_lock:
-                healthy = _last_report.get("healthy", True)
-                ts      = _last_report.get("checked_at", "")
-            body = (
-                f'{{"status":"ok","cluster":"{CLUSTER_NAME}",'
-                f'"healthy":{str(healthy).lower()},'
-                f'"checked_at":"{ts}"}}'
-            ).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(body)
+        if path == "/":
+            self._serve(_WEB_UI.encode("utf-8"), "text/html; charset=utf-8")
+
+        elif path in ("/health", "/healthz"):
+            snap = _data_store.latest()
+            if snap:
+                r  = snap["report"]
+                ok = r.get("healthy", True)
+                ts = r.get("checked_at", "")
+                cl = r.get("cluster", CLUSTER_NAME)
+            else:
+                ok, ts, cl = True, "", CLUSTER_NAME
+            body = json.dumps({"status": "ok", "cluster": cl,
+                               "healthy": ok, "checked_at": ts}).encode()
+            self._serve(body, "application/json")
+
+        elif path == "/api/status":
+            snap = _data_store.latest()
+            if snap:
+                r = dict(snap["report"])
+                r["check_duration"] = snap["duration"]
+                body = json.dumps(r, default=str).encode()
+            else:
+                body = json.dumps({"error": "no data yet — first check cycle pending"}).encode()
+            self._serve(body, "application/json")
+
+        elif path == "/api/history":
+            try:
+                h = float(params.get("hours", "1"))
+            except ValueError:
+                h = 1.0
+            self._serve(json.dumps(_data_store.history(h), default=str).encode(), "application/json")
+
+        elif path == "/api/node-events":
+            try:
+                h = float(params.get("hours", "6"))
+            except ValueError:
+                h = 6.0
+            self._serve(json.dumps(_node_watcher.get_events(h), default=str).encode(), "application/json")
 
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _serve(self, body: bytes, ctype: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, fmt, *args):
-        pass  # suppress per-request access logs to reduce noise
+        pass   # suppress per-request access logs
 
 
-def start_metrics_server():
-    """Start the HTTP server in a daemon thread."""
-    server = http.server.HTTPServer(("0.0.0.0", HTTP_PORT), _MetricsHandler)
-    t = threading.Thread(target=server.serve_forever, name="metrics-http", daemon=True)
+def start_web_server():
+    """Start the HTTP server (web UI + JSON API) in a daemon thread."""
+    server = http.server.HTTPServer(("0.0.0.0", HTTP_PORT), _WebHandler)
+    t = threading.Thread(target=server.serve_forever, name="web-http", daemon=True)
     t.start()
     print(
         f"[{_now().strftime('%Y-%m-%d %H:%M:%S UTC')}] "
-        f"📡 Metrics server listening on :{HTTP_PORT}  "
-        f"  /metrics  /health"
+        f"🌐 Web UI on :{HTTP_PORT}  "
+        f"→ /  /health  /api/status  /api/history  /api/node-events"
     )
     return server
 
@@ -2095,8 +2266,11 @@ def check_rbac(rbac_api) -> List[Dict]:
     return issues
 
 
-def check_network_policies(core, networking_api) -> List[Dict]:
+def check_network_policies(core, networking_api, pod_items: list) -> List[Dict]:
     """Flag namespaces with running pods but zero NetworkPolicy (Kubernetes Goat sc-20).
+
+    Accepts the pre-fetched pod_items list from run_all_checks() to avoid
+    a redundant list_pod_for_all_namespaces() API call.
 
     Checks:
       - NoNetworkPolicy  (INFO) — namespace has pods but no network segmentation
@@ -2113,15 +2287,12 @@ def check_network_policies(core, networking_api) -> List[Dict]:
     except Exception:
         ns_with_policy = set()
 
-    # Build set of namespaces that have at least one Running pod
-    ns_with_pods: Set[str] = set()
-    try:
-        for pod in core.list_pod_for_all_namespaces(
-            limit=300, field_selector="status.phase=Running"
-        ).items:
-            ns_with_pods.add(pod.metadata.namespace)
-    except Exception:
-        return issues
+    # Build set of namespaces that have at least one Running pod from pre-fetched data
+    ns_with_pods: Set[str] = {
+        pod.metadata.namespace
+        for pod in pod_items
+        if (pod.status.phase or "") == "Running" and pod.metadata.namespace
+    }
 
     for ns_obj in ns_items:
         ns = ns_obj.metadata.name
@@ -2477,7 +2648,7 @@ def run_all_checks() -> Tuple[Dict[str, Any], float]:
         # ── Security checks (Kubernetes Goat) ───────────────────────────────
         ("PodSecurity",     check_pod_security,      (pod_items,)),
         ("RBAC",            check_rbac,              (rbac,)),
-        ("NetworkPolicies", check_network_policies,  (core, networking)),
+        ("NetworkPolicies", check_network_policies,  (core, networking, pod_items)),
         ("NodePortServices",check_nodeport_services, (core,)),
         # ── Odoo Ladder-of-Limits compliance ────────────────────────────────
         ("OdooConfig",      check_odoo_config,       (core, apps, autoscaling)),
@@ -3087,7 +3258,7 @@ def send_slack(report: Dict[str, Any]):
         if i >= 15:
             blocks.append({"type": "section",
                            "text": {"type": "mrkdwn",
-                                    "text": f"_…and {len(issues)-15} more issues. Check /metrics or run kubectl._"}})
+                                    "text": f"_…and {len(issues)-15} more issues. Check the web UI (:8080) or run kubectl._"}})
             break
 
         em = _SE.get(iss["severity"], "•")
@@ -3128,9 +3299,7 @@ def send_slack(report: Dict[str, Any]):
 
 def run_once():
     report, duration = run_all_checks()
-    with _last_report_lock:
-        _last_report.update(report)
-    update_metrics(report, duration)
+    _data_store.add(report, duration)
     print_report(report)
     send_slack(report)
     return report
@@ -3138,15 +3307,12 @@ def run_once():
 
 def run_loop():
     ts_start = _now().strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(f"[{ts_start}] SRE Agent v3 started — cluster: {CLUSTER_NAME}  interval: {CHECK_INTERVAL}s")
+    print(f"[{ts_start}] SRE Agent v4 started — cluster: {CLUSTER_NAME}  interval: {CHECK_INTERVAL}s")
 
     while True:
         try:
             report, duration = run_all_checks()
-
-            with _last_report_lock:
-                _last_report.update(report)
-            update_metrics(report, duration)
+            _data_store.add(report, duration)
 
             s      = report["summary"]
             ts_now = report["checked_at"][:19].replace("T", " ")
@@ -3172,8 +3338,6 @@ def run_loop():
 
 
 if __name__ == "__main__":
-    _setup_rec_metrics()   # populate sre_check_rec_info once at startup
-
     # ── Parse shared flags ─────────────────────────────────────────────────────
     # --ns <namespace>  : filter events/incidents to a single namespace
     # --hours <N>       : override lookback window (default: SCALING_HISTORY_HOURS)
@@ -3361,8 +3525,9 @@ if __name__ == "__main__":
 
     else:
         if "--once" in sys.argv:
-            # Skip metrics server — port 8080 is already held by the running agent
+            # Skip web server — port 8080 may already be held by the running agent
             run_once()
         else:
-            start_metrics_server()
+            _node_watcher.start()
+            start_web_server()
             run_loop()

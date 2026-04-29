@@ -16,10 +16,9 @@ spec:
       labels:
         app: sre-agent
       annotations:
-        # Tell Prometheus to scrape this pod directly (fallback if ServiceMonitor not used)
-        prometheus.io/scrape: "true"
-        prometheus.io/port:   "8080"
-        prometheus.io/path:   "/metrics"
+        # Web UI and health check on port 8080
+        # Access: kubectl port-forward -n sre-agent svc/sre-agent 8080:80
+        sre-agent/web-ui: "http://localhost:8080/"
     spec:
       serviceAccountName: sre-agent
 
@@ -50,8 +49,8 @@ spec:
       containers:
         - name: sre-agent
           # ── IMPORTANT: update tag when you rebuild ──────────────────────
-          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v4
-          imagePullPolicy: Always
+          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v5
+          imagePullPolicy: IfNotPresent   # versioned tag — no need to re-pull on every restart
 
           # Default: continuous loop.
           # On-demand: kubectl exec deploy/sre-agent -n sre-agent -- python agent.py --once
@@ -69,17 +68,24 @@ spec:
             - secretRef:
                 name: sre-agent-secrets
 
-          # ── Expose metrics port ──────────────────────────────────────────
+          # ── Expose web UI port ───────────────────────────────────────────
           ports:
-            - name: metrics
+            - name: http              # matches the Service port name in 06-service.yaml
               containerPort: 8080
               protocol: TCP
 
           # ── Resource limits ──────────────────────────────────────────────
+          # Memory breakdown:
+          #   Python runtime + kubernetes client:  ~40 MB
+          #   DataStore (1 full report + 300 summary entries): ~10-30 MB
+          #   NodeWatcher event buffer + _known map: ~1 MB
+          #   Slack / request in-flight buffers:   ~5 MB
+          #   Total expected peak:                 ~60-80 MB
+          # Request set to 192Mi for headroom above the peak, limit at 256Mi.
           resources:
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 192Mi
               ephemeral-storage: 100Mi
             limits:
               cpu: 200m
