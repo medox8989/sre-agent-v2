@@ -173,16 +173,8 @@ kubectl set image deployment/sre-agent \
   -n "$NAMESPACE"
 
 kubectl apply -f "$K8S_DIR/06-service.yaml"
-
-# ── ServiceMonitor (optional — only if Prometheus Operator is running) ────────
-if kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; then
-  echo "→ Applying ServiceMonitor for Prometheus scraping..."
-  kubectl apply -f "$K8S_DIR/07-servicemonitor.yaml"
-  echo "✅ ServiceMonitor applied."
-else
-  echo "⚠️  Prometheus Operator CRD not found — skipping ServiceMonitor."
-  echo "   If you add kube-prometheus-stack later, run: kubectl apply -f k8s/07-servicemonitor.yaml"
-fi
+# Note: 07-servicemonitor.yaml is not applied — the v4 agent no longer exposes
+# Prometheus /metrics. The web UI is served at / and health at /health.
 
 echo ""
 echo "→ Waiting for rollout..."
