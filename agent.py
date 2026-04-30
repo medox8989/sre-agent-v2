@@ -893,16 +893,21 @@ class MetricsCollector:
     def _poll(self) -> None:
         custom, core = self._get_clients()
 
-        # ── Node allocatable capacity ────────────────────────────────────
+        # ── Node allocatable capacity + static disk capacity ────────────
         node_alloc: Dict[str, Dict] = {}
         total_cpu_alloc_m  = 0
         total_mem_alloc_mi = 0
         try:
             for n in core.list_node(limit=100).items:
                 alloc = n.status.allocatable or {}
+                cap   = n.status.capacity     or {}
                 cm    = _cpu(alloc.get("cpu", "0"))
                 mm    = _mem(alloc.get("memory", "0"))
-                node_alloc[n.metadata.name] = {"cpu_m": cm, "mem_mi": mm}
+                # static disk capacity from node spec (available even without kubelet proxy)
+                disk_cap_gi = round(_mem(cap.get("ephemeral-storage", "0")) / 1024, 1)
+                node_alloc[n.metadata.name] = {
+                    "cpu_m": cm, "mem_mi": mm, "disk_cap_gi": disk_cap_gi
+                }
                 total_cpu_alloc_m  += cm
                 total_mem_alloc_mi += mm
         except Exception:
@@ -920,6 +925,8 @@ class MetricsCollector:
             mem_mi = _mem(usage.get("memory", "0"))
             alloc  = node_alloc.get(name, {})
             ca, ma = alloc.get("cpu_m", 0), alloc.get("mem_mi", 0)
+            # seed disk_cap_gi from static node spec so bar always renders
+            dg = alloc.get("disk_cap_gi", 0.0)
             total_cpu_real_m  += cpu_m
             total_mem_real_mi += mem_mi
             node_snap.append({
@@ -930,33 +937,63 @@ class MetricsCollector:
                 "mem_mi":       mem_mi,
                 "mem_alloc_mi": ma,
                 "mem_pct":      round(mem_mi / ma * 100, 1) if ma else 0.0,
-                # disk fields populated below
-                "disk_cap_gi":  0.0,
+                # disk_cap_gi seeded from node spec; used/avail/pct filled by kubelet stats below
+                "disk_cap_gi":  dg,
                 "disk_avail_gi": 0.0,
                 "disk_used_gi": 0.0,
                 "disk_pct":     0.0,
             })
 
-        # ── Node disk usage (kubelet /stats/summary via API proxy) ────────
-        for node_item in node_snap:
-            nname = node_item["name"]
+        # ── Node disk usage via kubelet /stats/summary (direct REST call) ─
+        # Uses the in-cluster service account token directly — avoids the k8s
+        # client's proxy wrapper which can fail silently on some OKE versions.
+        import os as _os
+        _api_host = _os.environ.get("KUBERNETES_SERVICE_HOST", "")
+        _api_port = _os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS",
+                       _os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
+        _sa_token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        _sa_ca_path    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        _disk_ok = False
+        if _api_host:
             try:
-                raw   = core.connect_get_node_proxy_with_path(nname, "stats/summary")
-                stats = json.loads(raw)
-                fs    = stats.get("node", {}).get("fs", {})
-                cap_b   = fs.get("capacityBytes",  0) or 0
-                avail_b = fs.get("availableBytes", 0) or 0
-                used_b  = fs.get("usedBytes",      0) or 0
-                # metrics-server sometimes omits usedBytes — derive from cap - avail
-                if not used_b and cap_b and avail_b:
-                    used_b = cap_b - avail_b
-                gi = 1024 ** 3
-                node_item["disk_cap_gi"]   = round(cap_b   / gi, 1)
-                node_item["disk_avail_gi"] = round(avail_b / gi, 1)
-                node_item["disk_used_gi"]  = round(used_b  / gi, 1)
-                node_item["disk_pct"]      = round(used_b / cap_b * 100, 1) if cap_b else 0.0
-            except Exception:
-                pass   # graceful degradation: disk fields remain 0
+                _tok = open(_sa_token_path).read().strip()
+                for node_item in node_snap:
+                    nname = node_item["name"]
+                    try:
+                        url = (f"https://{_api_host}:{_api_port}"
+                               f"/api/v1/nodes/{nname}/proxy/stats/summary")
+                        r = requests.get(
+                            url,
+                            headers={"Authorization": f"Bearer {_tok}"},
+                            verify=_sa_ca_path,
+                            timeout=8,
+                        )
+                        if r.status_code == 200:
+                            fs    = r.json().get("node", {}).get("fs", {})
+                            cap_b   = int(fs.get("capacityBytes",  0) or 0)
+                            avail_b = int(fs.get("availableBytes", 0) or 0)
+                            used_b  = int(fs.get("usedBytes",      0) or 0)
+                            if not used_b and cap_b and avail_b:
+                                used_b = cap_b - avail_b
+                            gi = 1024 ** 3
+                            if cap_b:
+                                node_item["disk_cap_gi"]   = round(cap_b   / gi, 1)
+                                node_item["disk_avail_gi"] = round(avail_b / gi, 1)
+                                node_item["disk_used_gi"]  = round(used_b  / gi, 1)
+                                node_item["disk_pct"]      = round(used_b / cap_b * 100, 1)
+                                _disk_ok = True
+                        else:
+                            logging.warning(
+                                "[MetricsCollector] disk stats %s → HTTP %s "
+                                "(apply k8s/01-rbac.yaml if this is 403)",
+                                nname, r.status_code)
+                    except Exception as _de:
+                        logging.debug("[MetricsCollector] disk stats %s: %s", nname, _de)
+            except Exception as _te:
+                logging.debug("[MetricsCollector] disk token read: %s", _te)
+        if not _disk_ok:
+            logging.debug("[MetricsCollector] disk stats unavailable — "
+                          "ensure nodes/proxy RBAC is applied")
 
         # ── Pod real usage per namespace (metrics-server) ────────────────
         ns_cpu_real: Dict[str, int] = {}
@@ -1504,11 +1541,11 @@ function renderNodeBars(nodes){
         '<div class="nbar-line"><span class="nbar-lbl">RAM</span>'+
           '<span class="bar-segs">'+makeBar(n.mem_pct)+'</span>'+
           '<span class="nbar-val" style="color:'+valCol(n.mem_pct)+'">'+n.mem_pct.toFixed(1)+'%</span></div>'+
-        (n.disk_cap_gi ?
+        (n.disk_cap_gi > 0 ?
           '<div class="nbar-line"><span class="nbar-lbl">DISK</span>'+
             '<span class="bar-segs">'+makeBar(n.disk_pct||0)+'</span>'+
             '<span class="nbar-val" style="color:'+valCol(n.disk_pct||0)+'">'+
-              (n.disk_pct ? n.disk_pct.toFixed(1)+'%' : '—')+'</span>'+
+              (n.disk_pct||0).toFixed(1)+'%</span>'+
             '<span style="font-size:9px;color:var(--mu);margin-left:5px">'+
               (n.disk_used_gi||0).toFixed(1)+' / '+(n.disk_cap_gi||0).toFixed(1)+' Gi'+
             '</span></div>'
