@@ -1146,6 +1146,18 @@ class MetricsCollector:
         with self._lock:
             return dict(self._global_snap)
 
+    def ns_actual_latest(self) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Return (cpu_m_by_ns, mem_mi_by_ns) from the most recent 60-s snapshot.
+
+        These are *actual utilization* figures from the metrics-server, not
+        requests/limits.  Returns ({}, {}) if no snapshot is available yet.
+        """
+        with self._lock:
+            if not self._ns_snaps:
+                return {}, {}
+            snap = self._ns_snaps[-1]
+            return dict(snap.get("cpu", {})), dict(snap.get("mem", {}))
+
     def available(self) -> bool:
         with self._lock:
             return bool(self._available)
@@ -1268,23 +1280,48 @@ def _pod_restart_snapshot() -> Dict:
                 "age":              _age(pod.metadata.creation_timestamp),
             })
 
+        # Actual utilization per namespace (from MetricsCollector — may be {})
+        ns_cpu_actual, ns_mem_actual = _metrics_collector.ns_actual_latest()
+        metrics_available = bool(ns_cpu_actual or ns_mem_actual)
+
         # Cost attribution per namespace
         by_ns: Dict[str, Dict] = {}
         for ns in sorted(ns_pods.keys()):
             cpu_share = ns_cpu.get(ns, 0) / cluster_cpu_m
             mem_share = ns_mem.get(ns, 0) / cluster_mem_mi
-            dom_share = max(cpu_share, mem_share)   # dominant constraint
+            dom_share = max(cpu_share, mem_share)   # dominant constraint (request-based)
             node_equiv   = round(dom_share * node_count, 2)
             cost_month   = round(dom_share * total_cost_month, 2)
+
+            # Driver badge: compare *utilization efficiency* (actual / requested)
+            # so that over-provisioned CPU doesn't masquerade as the bottleneck.
+            cpu_req = ns_cpu.get(ns, 0)
+            mem_req = ns_mem.get(ns, 0)
+            cpu_act = ns_cpu_actual.get(ns, 0)
+            mem_act = ns_mem_actual.get(ns, 0)
+            if metrics_available and (cpu_req > 0 or mem_req > 0):
+                # Efficiency ratio: how much of the requested resource is actually used.
+                # High ratio → that resource is truly constrained; low ratio → slack.
+                cpu_eff = cpu_act / cpu_req if cpu_req > 0 else 0.0
+                mem_eff = mem_act / mem_req if mem_req > 0 else 0.0
+                driver  = "cpu" if cpu_eff >= mem_eff else "mem"
+            else:
+                # No live metrics yet — fall back to request-share comparison
+                driver = "cpu" if cpu_share >= mem_share else "mem"
+
             by_ns[ns] = {
-                "pods":       ns_pods[ns],
-                "cpu_req_m":  ns_cpu.get(ns, 0),
-                "mem_req_mi": ns_mem.get(ns, 0),
-                "cpu_pct":    round(cpu_share * 100, 1),
-                "mem_pct":    round(mem_share * 100, 1),
-                "dom_pct":    round(dom_share * 100, 1),
-                "node_equiv": node_equiv,
-                "cost_month": cost_month,
+                "pods":         ns_pods[ns],
+                "cpu_req_m":    cpu_req,
+                "mem_req_mi":   mem_req,
+                "cpu_util_m":   cpu_act,
+                "mem_util_mi":  mem_act,
+                "cpu_pct":      round(cpu_share * 100, 1),
+                "mem_pct":      round(mem_share * 100, 1),
+                "dom_pct":      round(dom_share * 100, 1),
+                "node_equiv":   node_equiv,
+                "cost_month":   cost_month,
+                "driver":       driver,
+                "metrics_live": metrics_available,
             }
 
         result = {
@@ -2310,16 +2347,33 @@ function renderCost(data){
     var n=byNs[ns];
     var barW=Math.max(2,Math.round((n.cost_month/maxCost)*100));
     var barCol=NS_PAL[idx%NS_PAL.length];
-    var domLabel=n.cpu_pct>=n.mem_pct
-      ?'<span title="CPU-bound" style="color:var(--blu);font-size:10px">&#9650; CPU</span>'
-      :'<span title="Memory-bound" style="color:var(--org);font-size:10px">&#9650; RAM</span>';
+
+    /* Driver badge — based on utilization efficiency (actual/requested) when
+       live metrics are available; falls back to request-share comparison.
+       This prevents over-provisioned CPU requests from masking RAM pressure. */
+    var live=n.metrics_live;
+    var isCpu=(n.driver==='cpu');
+    var cpuEff=n.cpu_req_m>0?Math.round((n.cpu_util_m||0)/n.cpu_req_m*100):0;
+    var memEff=n.mem_req_mi>0?Math.round((n.mem_util_mi||0)/n.mem_req_mi*100):0;
+    var tipDetail=live
+      ?(' | CPU eff: '+cpuEff+'% ('+fmtCpuM(n.cpu_util_m||0)+' actual / '+fmtCpuM(n.cpu_req_m||0)+' req)'
+        +' | RAM eff: '+memEff+'% ('+fmtMemGi(n.mem_util_mi||0)+' actual / '+fmtMemGi(n.mem_req_mi||0)+' req)')
+      :' (no live metrics — using request share)';
+    var domLabel=isCpu
+      ?'<span title="CPU-bound'+tipDetail+'" style="color:var(--blu);font-size:10px">&#9650; CPU</span>'
+      :'<span title="RAM-bound'+tipDetail+'" style="color:var(--org);font-size:10px">&#9650; RAM</span>';
+
+    /* CPU/RAM % columns: show request% and actual% side-by-side when live */
+    var cpuCell=n.cpu_pct+'%'+(live&&n.cpu_util_m?'<br><span class="mu" style="font-size:10px">'+fmtCpuM(n.cpu_util_m)+'</span>':'');
+    var memCell=n.mem_pct+'%'+(live&&n.mem_util_mi?'<br><span class="mu" style="font-size:10px">'+fmtMemGi(n.mem_util_mi)+'</span>':'');
+
     return '<tr>'+
       '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(ns)+'</span></td>'+
       '<td style="text-align:center" class="mono mu">'+n.pods+'</td>'+
       '<td class="mono mu">'+fmtCpuM(n.cpu_req_m||0)+'</td>'+
       '<td class="mono mu">'+fmtMemGi(n.mem_req_mi||0)+'</td>'+
-      '<td class="mono mu">'+n.cpu_pct+'%</td>'+
-      '<td class="mono mu">'+n.mem_pct+'%</td>'+
+      '<td class="mono mu">'+cpuCell+'</td>'+
+      '<td class="mono mu">'+memCell+'</td>'+
       '<td>'+domLabel+'</td>'+
       '<td class="mono mu">'+n.node_equiv+' nodes</td>'+
       '<td>'+
@@ -2352,7 +2406,10 @@ function renderCost(data){
       ' &middot; Pay-as-you-go: $'+c.price_ocpu_hr+'/OCPU-hr + $'+c.price_ram_gb_hr+'/GB-hr&nbsp;'+
       ' &middot; Node cost: <b>$'+c.node_cost_month+'/month</b>&nbsp;'+
       ' &middot; '+c.total_nodes+' nodes &times; $'+c.node_cost_month+' = <b>$'+c.total_cost_month+'/month</b>&nbsp;'+
-      ' &middot; Namespace share = max(CPU req %, RAM req %) of cluster allocatable.'+
+      ' &middot; Cost share = max(CPU req%, RAM req%) of cluster allocatable.'+
+      ' &middot; <b>Driver badge</b> uses utilization efficiency (actual÷requested) when live metrics are available,'+
+      ' so over-provisioned CPU requests do not mask RAM pressure.'+
+      ' Hover the badge for per-namespace efficiency detail.'+
       ' Override pricing via env vars <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>.';
   }
 }
