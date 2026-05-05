@@ -1493,6 +1493,16 @@ tr:hover td{background:var(--bg3);}
   <div class="res-grid" id="global-bars"></div>
   <!-- Per-node CPU + RAM progress bars -->
   <div id="node-bars"></div>
+  <!-- Namespace filter for CPU + Memory charts -->
+  <div class="pod-toolbar" style="margin:10px 0 6px">
+    <span class="pod-tg-label">Filter namespace</span>
+    <input id="chart-ns-filter" type="text" placeholder="e.g. hail" oninput="setChartFilter(this.value)"
+      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
+             padding:3px 9px;font-size:12px;width:170px;outline:none">
+    &nbsp;
+    <button class="btn" id="chart-ns-clear" onclick="setChartFilter('')" style="display:none">&#10005; Clear</button>
+    <span id="chart-ns-hint" class="mu" style="font-size:10px;margin-left:8px"></span>
+  </div>
   <!-- Namespace CPU time-series chart -->
   <div class="chart-card">
     <div class="chart-title">CPU Utilization by Namespace</div>
@@ -1556,6 +1566,18 @@ tr:hover td{background:var(--bg3);}
 <!-- ── Namespace Cost Attribution ────────────────────────────────── -->
 <section>
   <h2>&#128176; Namespace Cost Attribution</h2>
+  <div class="pod-toolbar" style="margin-bottom:8px">
+    <span class="pod-tg-label">Sort by</span>
+    <button class="btn on" id="cs-cost" onclick="setCostSort('cost')">Cost</button>
+    <button class="btn"    id="cs-ns"   onclick="setCostSort('ns')">Namespace</button>
+    &nbsp;
+    <span class="pod-tg-label">Filter namespace</span>
+    <input id="cost-ns-filter" type="text" placeholder="e.g. hail" oninput="setCostFilter(this.value)"
+      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
+             padding:3px 9px;font-size:12px;width:170px;outline:none">
+    &nbsp;
+    <button class="btn" id="cost-ns-clear" onclick="setCostFilter('')" style="display:none">&#10005; Clear</button>
+  </div>
   <div id="cost-table"></div>
   <p id="cost-methodology" class="mu" style="font-size:10px;margin-top:10px;line-height:1.7"></p>
 </section>
@@ -1563,6 +1585,15 @@ tr:hover td{background:var(--bg3);}
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
+  <div class="pod-toolbar" style="margin-bottom:8px">
+    <span class="pod-tg-label">Filter namespace</span>
+    <input id="iss-ns-filter" type="text" placeholder="e.g. hail" oninput="setIssFilter(this.value)"
+      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
+             padding:3px 9px;font-size:12px;width:170px;outline:none">
+    &nbsp;
+    <button class="btn" id="iss-ns-clear" onclick="setIssFilter('')" style="display:none">&#10005; Clear</button>
+    <span id="iss-ns-hint" class="mu" style="font-size:10px;margin-left:8px"></span>
+  </div>
   <div id="iss"></div>
 </section>
 <!-- ── Odoo Config Checks ─────────────────────────────────────────── -->
@@ -1587,7 +1618,12 @@ tr:hover td{background:var(--bg3);}
 </section>
 
 <script>
-var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0',rs:'restarts'};
+var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0',rs:'restarts',
+        mf:'',    /* chart (metrics) namespace filter text */
+        cf:'',    /* cost attribution namespace filter text */
+        cs:'cost',/* cost attribution sort key: 'cost' | 'ns' */
+        ifs:''    /* issues namespace filter text */
+};
 window._rstData=null;  /* cached restart API response */
 var RSEC=60,_el=0;
 
@@ -1686,13 +1722,31 @@ function renderCards(d){
     '<div class="card c-dur"><div class="lbl">Duration</div><div class="val">'+dur+'</div></div>';
 }
 
+/* ── extract namespace from issue resource field (e.g. "hail/hail-odoo" → "hail") */
+function issNs(i){
+  var r=i.resource||'';
+  var parts=r.split('/');
+  if(parts.length>=2&&parts[0]&&!/^[A-Z]/.test(parts[0]))return parts[0];
+  return '';  /* cluster-scoped or no namespace */
+}
+
 /* ── render: infra issues ─────────────────────────────────────────── */
 function renderIss(){
   var d=st.d;if(!d)return;
   var iss=(d.issues||[]).filter(function(i){return issVisible(i,'infra');});
+  /* apply namespace filter (case-insensitive substring match on extracted namespace) */
+  if(st.ifs){
+    var f=st.ifs.toLowerCase();
+    iss=iss.filter(function(i){return issNs(i).toLowerCase().indexOf(f)>=0;});
+  }
   var cnt=document.getElementById('i-cnt');if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('iss');
-  if(!iss.length){el.innerHTML='<p class="empty">No issues in the selected window / severity filter.</p>';return;}
+  if(!iss.length){
+    el.innerHTML='<p class="empty">'+(st.ifs
+      ?'No issues matching namespace &ldquo;'+esc(st.ifs)+'&rdquo;.'
+      :'No issues in the selected window / severity filter.')+'</p>';
+    return;
+  }
   el.innerHTML='<table><thead><tr><th>Severity</th><th>Timestamp (UTC)</th><th>Check</th><th>Resource</th><th>Message</th></tr></thead><tbody>'+iss.map(issRow).join('')+'</tbody></table>';
 }
 
@@ -1909,7 +1963,7 @@ var NS_PAL=[
   '#60a5fa', /* 15 cornflower   */
 ];
 
-function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
+function drawChart(cId,lId,snaps,field,fmtVal,fmtTick,nsFilter){
   var cEl=document.getElementById(cId),lEl=document.getElementById(lId);
   if(!cEl)return;
   if(!snaps||snaps.length<2){
@@ -1918,8 +1972,15 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
   }
   var nsSet={};
   snaps.forEach(function(s){Object.keys(s[field]||{}).forEach(function(ns){nsSet[ns]=1;});});
-  var nsList=Object.keys(nsSet).sort();
-  if(!nsList.length){cEl.innerHTML='<p class="empty">No namespace data.</p>';return;}
+  var allNsList=Object.keys(nsSet).sort();
+  /* apply free-text namespace filter (case-insensitive substring) */
+  var nsList=nsFilter
+    ?allNsList.filter(function(ns){return ns.toLowerCase().indexOf(nsFilter.toLowerCase())>=0;})
+    :allNsList;
+  if(!nsList.length){
+    cEl.innerHTML='<p class="empty">No namespaces match &ldquo;'+esc(nsFilter||'')+'&rdquo;.</p>';
+    if(lEl)lEl.innerHTML='';return;
+  }
 
   var W=700,H=200,PL=54,PR=12,PT=12,PB=32;  /* PB=32 reserves space for time axis */
   var cw=W-PL-PR,ch=H-PT-PB;
@@ -1983,6 +2044,8 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick){
 
 /* render: entire resource utilization section */
 function renderMetrics(data){
+  /* cache the full response so the namespace filter can re-draw without re-fetching */
+  if(data)window._metricsData=data;else data=window._metricsData||data;
   /* cache node metrics by name for use in renderNodes */
   st.mn={};
   if(data&&data.nodes){data.nodes.forEach(function(n){st.mn[n.name]=n;});}
@@ -1997,8 +2060,8 @@ function renderMetrics(data){
   if(unavEl)unavEl.style.display='none';
   renderGlobal(data.global||{});
   renderNodeBars(data.nodes||[]);
-  drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick);
-  drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick);
+  drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick,st.mf);
+  drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick,st.mf);
 }
 
 /* ── main fetch ───────────────────────────────────────────────────── */
@@ -2255,6 +2318,48 @@ function setRstSort(key){
   if(window._rstData)renderRestarts(window._rstData);
 }
 
+/* ── Chart (CPU + Memory) namespace filter ───────────────────────── */
+function setChartFilter(v){
+  st.mf=v.trim();
+  var inp=document.getElementById('chart-ns-filter');
+  var clr=document.getElementById('chart-ns-clear');
+  var hint=document.getElementById('chart-ns-hint');
+  if(inp&&inp.value!==v)inp.value=v;           /* sync when called from clear button */
+  if(clr)clr.style.display=st.mf?'':'none';
+  if(hint)hint.textContent=st.mf?'Showing namespaces matching "'+st.mf+'"':'';
+  /* re-draw charts with current cached data */
+  if(window._metricsData)renderMetrics(window._metricsData);
+}
+
+/* ── Cost Attribution namespace filter + sort ────────────────────── */
+function setCostSort(key){
+  st.cs=key;
+  ['cost','ns'].forEach(function(k){
+    var b=document.getElementById('cs-'+k);if(b)b.className='btn'+(k===key?' on':'');
+  });
+  if(window._rstData)renderCost(window._rstData);
+}
+function setCostFilter(v){
+  st.cf=v.trim();
+  var inp=document.getElementById('cost-ns-filter');
+  var clr=document.getElementById('cost-ns-clear');
+  if(inp&&inp.value!==v)inp.value=v;
+  if(clr)clr.style.display=st.cf?'':'none';
+  if(window._rstData)renderCost(window._rstData);
+}
+
+/* ── Issues namespace filter ─────────────────────────────────────── */
+function setIssFilter(v){
+  st.ifs=v.trim();
+  var inp=document.getElementById('iss-ns-filter');
+  var clr=document.getElementById('iss-ns-clear');
+  var hint=document.getElementById('iss-ns-hint');
+  if(inp&&inp.value!==v)inp.value=v;
+  if(clr)clr.style.display=st.ifs?'':'none';
+  if(hint)hint.textContent=st.ifs?'Showing namespace "'+st.ifs+'"':'';
+  renderIss();
+}
+
 function rstBadge(n){
   if(!n)return '<span class="rst-badge rst-0">0</span>';
   if(n<=3) return '<span class="rst-badge rst-low">'+n+'</span>';
@@ -2331,12 +2436,26 @@ function renderCost(data){
   if(!el||!data||!data.cost)return;
   var c=data.cost;
   var byNs=c.by_ns||{};
-  var nsList=Object.keys(byNs).sort(function(a,b){
+
+  /* sort: by cost (default) or alphabetically by namespace */
+  var allNsList=Object.keys(byNs).sort(function(a,b){
+    if(st.cs==='ns')return a.localeCompare(b);
     return (byNs[b].cost_month||0)-(byNs[a].cost_month||0);
   });
-  if(!nsList.length){el.innerHTML='<p class="empty">No pod data yet.</p>';return;}
 
-  /* find max cost for bar scaling */
+  /* apply free-text namespace filter (case-insensitive substring) */
+  var nsList=st.cf
+    ?allNsList.filter(function(ns){return ns.toLowerCase().indexOf(st.cf.toLowerCase())>=0;})
+    :allNsList;
+
+  if(!nsList.length){
+    el.innerHTML='<p class="empty">'+(st.cf
+      ?'No namespaces match &ldquo;'+esc(st.cf)+'&rdquo;.'
+      :'No pod data yet.')+'</p>';
+    return;
+  }
+
+  /* find max cost for bar scaling (relative to filtered set) */
   var maxCost=Math.max.apply(null,nsList.map(function(ns){return byNs[ns].cost_month||0;}));
   if(!maxCost)maxCost=1;
 
