@@ -1457,6 +1457,14 @@ tr:hover td{background:var(--bg3);}
 .cost-bar{height:100%;border-radius:3px;transition:width .3s;}
 .res-unavail{color:var(--yel);background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.25);
              border-radius:6px;padding:8px 14px;font-size:12px;margin-bottom:12px;display:none;}
+/* ── Global namespace filter ─────────────────────────────────────────── */
+#gf-ns-input{background:var(--bg3);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
+             padding:3px 9px;font-size:12px;width:200px;outline:none;transition:border-color .15s;}
+#gf-ns-input:focus{border-color:var(--blu);box-shadow:0 0 0 2px rgba(88,166,255,.18);}
+#gf-ns-input::placeholder{color:var(--mu);}
+#gf-active-bar{background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.28);border-radius:5px;
+               padding:5px 14px;font-size:11px;color:var(--blu);display:none;
+               align-items:center;gap:10px;margin:0 0 4px;}
 </style>
 </head>
 <body>
@@ -1481,6 +1489,18 @@ tr:hover td{background:var(--bg3);}
   <button class="btn sev-C on" id="sb-C" onclick="togS('C')">&#128308; Critical</button>
   <button class="btn sev-W on" id="sb-W" onclick="togS('W')">&#128993; Warning</button>
   <button class="btn sev-I on" id="sb-I" onclick="togS('I')">&#8505;&#65039; Info</button>
+  &nbsp;&nbsp;
+  <span class="pod-tg-label">Namespace</span>
+  <input list="gf-ns-list" id="gf-ns-input" placeholder="All namespaces"
+    oninput="setGlobalFilter(this.value)" onchange="setGlobalFilter(this.value)">
+  <datalist id="gf-ns-list"></datalist>
+  <button class="btn" id="gf-clear" onclick="setGlobalFilter('')" style="display:none" title="Clear namespace filter">&#10005;</button>
+</div>
+<!-- Active namespace filter indicator bar -->
+<div id="gf-active-bar" style="padding:5px 20px;display:none">
+  <span>&#128269;</span>
+  <span>Filtering all sections by namespace: <b id="gf-active-label"></b></span>
+  <span style="margin-left:auto;cursor:pointer;opacity:.7" onclick="setGlobalFilter('')">&#10005; Clear filter</span>
 </div>
 
 <!-- ── Resource Utilization ───────────────────────────────────────── -->
@@ -1493,16 +1513,6 @@ tr:hover td{background:var(--bg3);}
   <div class="res-grid" id="global-bars"></div>
   <!-- Per-node CPU + RAM progress bars -->
   <div id="node-bars"></div>
-  <!-- Namespace filter for CPU + Memory charts -->
-  <div class="pod-toolbar" style="margin:10px 0 6px">
-    <span class="pod-tg-label">Filter namespace</span>
-    <input id="chart-ns-filter" type="text" placeholder="e.g. hail" oninput="setChartFilter(this.value)"
-      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
-             padding:3px 9px;font-size:12px;width:170px;outline:none">
-    &nbsp;
-    <button class="btn" id="chart-ns-clear" onclick="setChartFilter('')" style="display:none">&#10005; Clear</button>
-    <span id="chart-ns-hint" class="mu" style="font-size:10px;margin-left:8px"></span>
-  </div>
   <!-- Namespace CPU time-series chart -->
   <div class="chart-card">
     <div class="chart-title">CPU Utilization by Namespace</div>
@@ -1570,13 +1580,6 @@ tr:hover td{background:var(--bg3);}
     <span class="pod-tg-label">Sort by</span>
     <button class="btn on" id="cs-cost" onclick="setCostSort('cost')">Cost</button>
     <button class="btn"    id="cs-ns"   onclick="setCostSort('ns')">Namespace</button>
-    &nbsp;
-    <span class="pod-tg-label">Filter namespace</span>
-    <input id="cost-ns-filter" type="text" placeholder="e.g. hail" oninput="setCostFilter(this.value)"
-      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
-             padding:3px 9px;font-size:12px;width:170px;outline:none">
-    &nbsp;
-    <button class="btn" id="cost-ns-clear" onclick="setCostFilter('')" style="display:none">&#10005; Clear</button>
   </div>
   <div id="cost-table"></div>
   <p id="cost-methodology" class="mu" style="font-size:10px;margin-top:10px;line-height:1.7"></p>
@@ -1585,15 +1588,6 @@ tr:hover td{background:var(--bg3);}
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
-  <div class="pod-toolbar" style="margin-bottom:8px">
-    <span class="pod-tg-label">Filter namespace</span>
-    <input id="iss-ns-filter" type="text" placeholder="e.g. hail" oninput="setIssFilter(this.value)"
-      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;
-             padding:3px 9px;font-size:12px;width:170px;outline:none">
-    &nbsp;
-    <button class="btn" id="iss-ns-clear" onclick="setIssFilter('')" style="display:none">&#10005; Clear</button>
-    <span id="iss-ns-hint" class="mu" style="font-size:10px;margin-left:8px"></span>
-  </div>
   <div id="iss"></div>
 </section>
 <!-- ── Odoo Config Checks ─────────────────────────────────────────── -->
@@ -1619,10 +1613,8 @@ tr:hover td{background:var(--bg3);}
 
 <script>
 var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0',rs:'restarts',
-        mf:'',    /* chart (metrics) namespace filter text */
-        cf:'',    /* cost attribution namespace filter text */
-        cs:'cost',/* cost attribution sort key: 'cost' | 'ns' */
-        ifs:''    /* issues namespace filter text */
+        gf:'',    /* global namespace filter — applies to CPU/RAM charts, Cost, Issues */
+        cs:'cost' /* cost attribution sort key: 'cost' | 'ns' */
 };
 window._rstData=null;  /* cached restart API response */
 var RSEC=60,_el=0;
@@ -1734,16 +1726,16 @@ function issNs(i){
 function renderIss(){
   var d=st.d;if(!d)return;
   var iss=(d.issues||[]).filter(function(i){return issVisible(i,'infra');});
-  /* apply namespace filter (case-insensitive substring match on extracted namespace) */
-  if(st.ifs){
-    var f=st.ifs.toLowerCase();
+  /* apply global namespace filter (case-insensitive substring match on extracted namespace) */
+  if(st.gf){
+    var f=st.gf.toLowerCase();
     iss=iss.filter(function(i){return issNs(i).toLowerCase().indexOf(f)>=0;});
   }
   var cnt=document.getElementById('i-cnt');if(cnt)cnt.textContent='('+iss.length+')';
   var el=document.getElementById('iss');
   if(!iss.length){
-    el.innerHTML='<p class="empty">'+(st.ifs
-      ?'No issues matching namespace &ldquo;'+esc(st.ifs)+'&rdquo;.'
+    el.innerHTML='<p class="empty">'+(st.gf
+      ?'No issues matching namespace &ldquo;'+esc(st.gf)+'&rdquo;.'
       :'No issues in the selected window / severity filter.')+'</p>';
     return;
   }
@@ -2060,8 +2052,12 @@ function renderMetrics(data){
   if(unavEl)unavEl.style.display='none';
   renderGlobal(data.global||{});
   renderNodeBars(data.nodes||[]);
-  drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick,st.mf);
-  drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick,st.mf);
+  /* populate datalist with all namespaces seen in the metrics snapshots */
+  var nsSet={};
+  (data.snaps||[]).forEach(function(s){Object.keys(s.cpu||{}).forEach(function(ns){nsSet[ns]=1;});});
+  _addNsToSet(Object.keys(nsSet));
+  drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick,st.gf);
+  drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick,st.gf);
 }
 
 /* ── main fetch ───────────────────────────────────────────────────── */
@@ -2070,6 +2066,8 @@ function fetchAll(){
     st.d=d;
     renderCards(d);renderIss();renderOdoo();renderKevt(d.issues);renderNodes(d.nodes_overview);
     document.getElementById('eb').style.display='none';
+    /* harvest namespaces from issue resource fields */
+    _addNsToSet((d.issues||[]).map(issNs).filter(Boolean));
   }).catch(function(e){
     var eb=document.getElementById('eb');eb.textContent='Failed to fetch /api/status: '+e;eb.style.display='block';
   });
@@ -2319,19 +2317,7 @@ function setRstSort(key){
 }
 
 /* ── Chart (CPU + Memory) namespace filter ───────────────────────── */
-function setChartFilter(v){
-  st.mf=v.trim();
-  var inp=document.getElementById('chart-ns-filter');
-  var clr=document.getElementById('chart-ns-clear');
-  var hint=document.getElementById('chart-ns-hint');
-  if(inp&&inp.value!==v)inp.value=v;           /* sync when called from clear button */
-  if(clr)clr.style.display=st.mf?'':'none';
-  if(hint)hint.textContent=st.mf?'Showing namespaces matching "'+st.mf+'"':'';
-  /* re-draw charts with current cached data */
-  if(window._metricsData)renderMetrics(window._metricsData);
-}
-
-/* ── Cost Attribution namespace filter + sort ────────────────────── */
+/* ── Cost Attribution sort ───────────────────────────────────────── */
 function setCostSort(key){
   st.cs=key;
   ['cost','ns'].forEach(function(k){
@@ -2339,25 +2325,53 @@ function setCostSort(key){
   });
   if(window._rstData)renderCost(window._rstData);
 }
-function setCostFilter(v){
-  st.cf=v.trim();
-  var inp=document.getElementById('cost-ns-filter');
-  var clr=document.getElementById('cost-ns-clear');
+
+/* ── Global namespace filter ─────────────────────────────────────── *
+ *  Applies simultaneously to: CPU chart, Memory chart,               *
+ *  Namespace Cost Attribution, and Issues.                            *
+ * ─────────────────────────────────────────────────────────────────── */
+function setGlobalFilter(v){
+  st.gf=v.trim();
+
+  /* sync the input field (handles programmatic calls, e.g. "Clear") */
+  var inp=document.getElementById('gf-ns-input');
   if(inp&&inp.value!==v)inp.value=v;
-  if(clr)clr.style.display=st.cf?'':'none';
-  if(window._rstData)renderCost(window._rstData);
+
+  /* show/hide the ✕ clear button */
+  var clr=document.getElementById('gf-clear');
+  if(clr)clr.style.display=st.gf?'inline-block':'none';
+
+  /* show/hide the active-filter indicator bar */
+  var bar=document.getElementById('gf-active-bar');
+  var lbl=document.getElementById('gf-active-label');
+  if(bar){bar.style.display=st.gf?'flex':'none';}
+  if(lbl)lbl.textContent=st.gf;
+
+  /* re-render all four filtered sections */
+  if(window._metricsData)renderMetrics(window._metricsData);
+  if(window._rstData)    renderCost(window._rstData);
+  renderIss();
 }
 
-/* ── Issues namespace filter ─────────────────────────────────────── */
-function setIssFilter(v){
-  st.ifs=v.trim();
-  var inp=document.getElementById('iss-ns-filter');
-  var clr=document.getElementById('iss-ns-clear');
-  var hint=document.getElementById('iss-ns-hint');
-  if(inp&&inp.value!==v)inp.value=v;
-  if(clr)clr.style.display=st.ifs?'':'none';
-  if(hint)hint.textContent=st.ifs?'Showing namespace "'+st.ifs+'"':'';
-  renderIss();
+/* ── Namespace datalist: keeps <datalist id="gf-ns-list"> fresh ───── *
+ *  Called after any data source arrives so autocomplete always shows  *
+ *  every known namespace from across all sections.                    *
+ * ─────────────────────────────────────────────────────────────────── */
+window._allNs=new Set();
+
+function updateNsDatalist(){
+  var dl=document.getElementById('gf-ns-list');
+  if(!dl)return;
+  /* rebuild from the accumulated set */
+  dl.innerHTML=Array.from(window._allNs).sort().map(function(ns){
+    return '<option value="'+esc(ns)+'">';
+  }).join('');
+}
+
+function _addNsToSet(nsList){
+  if(!nsList)return;
+  nsList.forEach(function(ns){window._allNs.add(ns);});
+  updateNsDatalist();
 }
 
 function rstBadge(n){
@@ -2373,13 +2387,15 @@ function renderRestarts(data){
   if(!el||!data)return;
   var pods=(data.pods||[]).slice();
 
-  /* populate namespace filter dropdown (first call) */
+  /* populate Pod Restart Activity namespace filter dropdown (first call) */
   var sel=document.getElementById('rst-ns-filter');
   if(sel&&sel.options.length<=1){
     var nsSet={};pods.forEach(function(p){nsSet[p.ns]=1;});
     Object.keys(nsSet).sort().forEach(function(ns){
       var o=document.createElement('option');o.value=ns;o.textContent=ns;sel.appendChild(o);
     });
+    /* also feed the global datalist with all namespace names */
+    _addNsToSet(Object.keys(nsSet));
   }
 
   /* apply namespace filter */
@@ -2437,20 +2453,23 @@ function renderCost(data){
   var c=data.cost;
   var byNs=c.by_ns||{};
 
+  /* feed all cost namespaces into the global datalist */
+  _addNsToSet(Object.keys(byNs));
+
   /* sort: by cost (default) or alphabetically by namespace */
   var allNsList=Object.keys(byNs).sort(function(a,b){
     if(st.cs==='ns')return a.localeCompare(b);
     return (byNs[b].cost_month||0)-(byNs[a].cost_month||0);
   });
 
-  /* apply free-text namespace filter (case-insensitive substring) */
-  var nsList=st.cf
-    ?allNsList.filter(function(ns){return ns.toLowerCase().indexOf(st.cf.toLowerCase())>=0;})
+  /* apply global namespace filter (case-insensitive substring) */
+  var nsList=st.gf
+    ?allNsList.filter(function(ns){return ns.toLowerCase().indexOf(st.gf.toLowerCase())>=0;})
     :allNsList;
 
   if(!nsList.length){
-    el.innerHTML='<p class="empty">'+(st.cf
-      ?'No namespaces match &ldquo;'+esc(st.cf)+'&rdquo;.'
+    el.innerHTML='<p class="empty">'+(st.gf
+      ?'No namespaces match &ldquo;'+esc(st.gf)+'&rdquo;.'
       :'No pod data yet.')+'</p>';
     return;
   }
