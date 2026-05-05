@@ -1153,6 +1153,165 @@ class MetricsCollector:
 
 _metrics_collector = MetricsCollector(poll_interval=60)
 
+# Simple TTL cache for the pod-restarts snapshot (avoids hammering the API)
+_pod_restart_cache: Dict = {}
+_pod_restart_cache_ts: float = 0.0
+_POD_RESTART_CACHE_TTL = 60  # seconds
+
+
+def _pod_restart_snapshot() -> Dict:
+    """Fetch pod restart counts, node placement, and OCI cost attribution.
+
+    Results are cached for _POD_RESTART_CACHE_TTL seconds to avoid hammering
+    the Kubernetes API on every dashboard refresh.
+
+    OCI pricing assumptions (pay-as-you-go, public rates):
+      VM.Standard.E5.Flex — OCPU: $0.025/hr, Memory: $0.0015/GB/hr
+      These can be overridden via env vars OCI_OCPU_PRICE_HR and
+      OCI_RAM_GB_PRICE_HR to reflect Universal Credits or reserved pricing.
+    """
+    global _pod_restart_cache, _pod_restart_cache_ts
+    now = time.time()
+    if _pod_restart_cache and (now - _pod_restart_cache_ts) < _POD_RESTART_CACHE_TTL:
+        return _pod_restart_cache
+
+    import os as _os
+    OCPU_PRICE_HR    = float(_os.environ.get("OCI_OCPU_PRICE_HR",   "0.025"))
+    RAM_GB_PRICE_HR  = float(_os.environ.get("OCI_RAM_GB_PRICE_HR", "0.0015"))
+    OCPU_PER_NODE    = float(_os.environ.get("OCI_OCPU_PER_NODE",   "4.0"))
+    RAM_GI_PER_NODE  = float(_os.environ.get("OCI_RAM_GI_PER_NODE", "15.3"))
+    OCI_INSTANCE     = _os.environ.get("OCI_INSTANCE_TYPE", "VM.Standard.E5.Flex")
+
+    node_cost_hr    = (OCPU_PER_NODE * OCPU_PRICE_HR) + (RAM_GI_PER_NODE * RAM_GB_PRICE_HR)
+    node_cost_month = round(node_cost_hr * 24 * 30, 2)
+
+    try:
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        core_api = client.CoreV1Api()
+
+        # Cluster-level allocatable (from MetricsCollector cache if available)
+        g = _metrics_collector.global_current()
+        cluster_cpu_m  = g.get("cpu_alloc_m",  0) or 1
+        cluster_mem_mi = g.get("mem_alloc_mi", 0) or 1
+
+        # Node count
+        node_items   = core_api.list_node(limit=100).items
+        node_count   = len(node_items)
+        total_cost_month = round(node_cost_month * node_count, 2)
+
+        # All pods (Running + Pending + Failed)
+        pod_items = core_api.list_pod_for_all_namespaces(limit=500).items
+
+        pods: List[Dict] = []
+        ns_cpu:  Dict[str, int] = {}
+        ns_mem:  Dict[str, int] = {}
+        ns_pods: Dict[str, int] = {}
+
+        for pod in pod_items:
+            phase = (pod.status.phase or "Unknown")
+            if phase not in ("Running", "Pending", "Failed", "CrashLoopBackOff"):
+                continue
+
+            name = pod.metadata.name
+            ns   = pod.metadata.namespace
+            node = pod.spec.node_name or "—"
+
+            # Restart count and last restart timestamp across all containers
+            total_restarts = 0
+            last_restart_ts  = ""
+            last_restart_ago = ""
+            all_cs = list(pod.status.container_statuses or []) + \
+                     list(pod.status.init_container_statuses or [])
+            for cs in all_cs:
+                total_restarts += cs.restart_count or 0
+                ls = cs.last_state
+                if ls and ls.terminated and ls.terminated.finished_at:
+                    ft = ls.terminated.finished_at
+                    ft_iso = ft.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(ft, "strftime") else str(ft)[:19]
+                    if not last_restart_ts or ft_iso > last_restart_ts:
+                        last_restart_ts  = ft_iso
+                        last_restart_ago = _age(ft)
+
+            # Ready condition
+            ready = any(
+                c.type == "Ready" and c.status == "True"
+                for c in (pod.status.conditions or [])
+            )
+
+            # Resource requests
+            cpu_req = 0
+            mem_req = 0
+            for c in (pod.spec.containers or []):
+                res = c.resources
+                if res and res.requests:
+                    cpu_req += _cpu(res.requests.get("cpu",    "0"))
+                    mem_req += _mem(res.requests.get("memory", "0"))
+
+            ns_cpu[ns]  = ns_cpu.get(ns, 0)  + cpu_req
+            ns_mem[ns]  = ns_mem.get(ns, 0)  + mem_req
+            ns_pods[ns] = ns_pods.get(ns, 0) + 1
+
+            pods.append({
+                "name":             name,
+                "ns":               ns,
+                "node":             node,
+                "phase":            phase,
+                "ready":            ready,
+                "restarts":         total_restarts,
+                "last_restart_ts":  last_restart_ts,
+                "last_restart_ago": last_restart_ago,
+                "cpu_req_m":        cpu_req,
+                "mem_req_mi":       mem_req,
+                "age":              _age(pod.metadata.creation_timestamp),
+            })
+
+        # Cost attribution per namespace
+        by_ns: Dict[str, Dict] = {}
+        for ns in sorted(ns_pods.keys()):
+            cpu_share = ns_cpu.get(ns, 0) / cluster_cpu_m
+            mem_share = ns_mem.get(ns, 0) / cluster_mem_mi
+            dom_share = max(cpu_share, mem_share)   # dominant constraint
+            node_equiv   = round(dom_share * node_count, 2)
+            cost_month   = round(dom_share * total_cost_month, 2)
+            by_ns[ns] = {
+                "pods":       ns_pods[ns],
+                "cpu_req_m":  ns_cpu.get(ns, 0),
+                "mem_req_mi": ns_mem.get(ns, 0),
+                "cpu_pct":    round(cpu_share * 100, 1),
+                "mem_pct":    round(mem_share * 100, 1),
+                "dom_pct":    round(dom_share * 100, 1),
+                "node_equiv": node_equiv,
+                "cost_month": cost_month,
+            }
+
+        result = {
+            "pods": pods,
+            "cost": {
+                "oci_instance":        OCI_INSTANCE,
+                "ocpu_per_node":       OCPU_PER_NODE,
+                "ram_gi_per_node":     RAM_GI_PER_NODE,
+                "price_ocpu_hr":       OCPU_PRICE_HR,
+                "price_ram_gb_hr":     RAM_GB_PRICE_HR,
+                "node_cost_month":     node_cost_month,
+                "total_nodes":         node_count,
+                "total_cost_month":    total_cost_month,
+                "cluster_cpu_alloc_m": cluster_cpu_m,
+                "cluster_mem_alloc_mi":cluster_mem_mi,
+                "by_ns":               by_ns,
+            },
+        }
+
+    except Exception as e:
+        logging.warning("pod_restart_snapshot error: %s", e)
+        result = {"error": str(e), "pods": [], "cost": {}}
+
+    _pod_restart_cache    = result
+    _pod_restart_cache_ts = time.time()
+    return result
+
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  WEB UI  — self-contained dashboard served at /                  ║
@@ -1252,6 +1411,13 @@ tr:hover td{background:var(--bg3);}
 .chart-legend span{display:inline-flex;align-items:center;gap:4px;}
 .pod-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;}
 .pod-tg-label{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.06em;margin-right:2px;}
+.rst-badge{display:inline-block;min-width:28px;text-align:center;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;}
+.rst-0{background:#1c2128;color:#484f58;}
+.rst-low{background:#3a2e05;color:#e3b341;}
+.rst-mid{background:#3d1e00;color:#ffa657;}
+.rst-high{background:#3d0b0b;color:#f85149;}
+.cost-bar-wrap{height:14px;background:#1c2128;border-radius:3px;overflow:hidden;min-width:60px;}
+.cost-bar{height:100%;border-radius:3px;transition:width .3s;}
 .res-unavail{color:var(--yel);background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.25);
              border-radius:6px;padding:8px 14px;font-size:12px;margin-bottom:12px;display:none;}
 </style>
@@ -1326,6 +1492,37 @@ tr:hover td{background:var(--bg3);}
     min-width:160px;max-width:300px;box-shadow:0 4px 16px rgba(0,0,0,.5);line-height:1.7"></div>
 </section>
 
+<!-- ── Pod Restart Activity ───────────────────────────────────────── -->
+<section>
+  <h2>&#128257; Pod Restart Activity <span class="cnt" id="rst-cnt"></span></h2>
+  <div class="pod-toolbar">
+    <span class="pod-tg-label">Sort by</span>
+    <button class="btn on" id="rs-restarts"  onclick="setRstSort('restarts')">Restarts</button>
+    <button class="btn"    id="rs-ns"         onclick="setRstSort('ns')">Namespace</button>
+    <button class="btn"    id="rs-node"        onclick="setRstSort('node')">Node</button>
+    <button class="btn"    id="rs-name"        onclick="setRstSort('name')">Name</button>
+    &nbsp;
+    <span class="pod-tg-label">Filter</span>
+    <select id="rst-ns-filter" onchange="renderRestarts(window._rstData)"
+      style="background:var(--bg2);color:var(--tx);border:1px solid var(--bd);border-radius:4px;padding:3px 7px;font-size:12px">
+      <option value="">All namespaces</option>
+    </select>
+    &nbsp;
+    <label style="font-size:11px;color:var(--mu)">
+      <input type="checkbox" id="rst-only-restarts" onchange="renderRestarts(window._rstData)">
+      only pods with restarts
+    </label>
+  </div>
+  <div id="rst-table"></div>
+</section>
+
+<!-- ── Namespace Cost Attribution ────────────────────────────────── -->
+<section>
+  <h2>&#128176; Namespace Cost Attribution</h2>
+  <div id="cost-table"></div>
+  <p id="cost-methodology" class="mu" style="font-size:10px;margin-top:10px;line-height:1.7"></p>
+</section>
+
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
@@ -1353,7 +1550,8 @@ tr:hover td{background:var(--bg3);}
 </section>
 
 <script>
-var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0'};  /* pr=pod-range pb=pod-biz */
+var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0',rs:'restarts'};
+window._rstData=null;  /* cached restart API response */
 var RSEC=60,_el=0;
 
 /* ── utilities ────────────────────────────────────────────────────── */
@@ -1778,6 +1976,7 @@ function fetchAll(){
   fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
   fetch('/api/ns-metrics?hours='+st.h).then(function(r){return r.json();}).then(renderMetrics).catch(function(){});
   fetchPodTimeline();
+  fetchRestarts();
 }
 
 /* ── Pod timeline fetch + render ─────────────────────────────────── */
@@ -2000,6 +2199,164 @@ function renderPodTimeline(data){
   svgEl.addEventListener('mouseleave',podLeave);
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   POD RESTART ACTIVITY + COST ATTRIBUTION
+   ══════════════════════════════════════════════════════════════════ */
+
+function fetchRestarts(){
+  fetch('/api/pod-restarts')
+    .then(function(r){return r.json();})
+    .then(function(d){window._rstData=d;renderRestarts(d);renderCost(d);})
+    .catch(function(){});
+}
+
+function setRstSort(key){
+  st.rs=key;
+  ['restarts','ns','node','name'].forEach(function(k){
+    var b=document.getElementById('rs-'+k);if(b)b.className='btn'+(k===key?' on':'');
+  });
+  if(window._rstData)renderRestarts(window._rstData);
+}
+
+function rstBadge(n){
+  if(!n)return '<span class="rst-badge rst-0">0</span>';
+  if(n<=3) return '<span class="rst-badge rst-low">'+n+'</span>';
+  if(n<=9) return '<span class="rst-badge rst-mid">'+n+'</span>';
+  return '<span class="rst-badge rst-high">'+n+'</span>';
+}
+
+function renderRestarts(data){
+  var el=document.getElementById('rst-table');
+  var cnt=document.getElementById('rst-cnt');
+  if(!el||!data)return;
+  var pods=(data.pods||[]).slice();
+
+  /* populate namespace filter dropdown (first call) */
+  var sel=document.getElementById('rst-ns-filter');
+  if(sel&&sel.options.length<=1){
+    var nsSet={};pods.forEach(function(p){nsSet[p.ns]=1;});
+    Object.keys(nsSet).sort().forEach(function(ns){
+      var o=document.createElement('option');o.value=ns;o.textContent=ns;sel.appendChild(o);
+    });
+  }
+
+  /* apply namespace filter */
+  var nsF=sel?sel.value:'';
+  if(nsF)pods=pods.filter(function(p){return p.ns===nsF;});
+
+  /* apply "only restarts" filter */
+  var onlyR=document.getElementById('rst-only-restarts');
+  if(onlyR&&onlyR.checked)pods=pods.filter(function(p){return p.restarts>0;});
+
+  /* sort */
+  pods.sort(function(a,b){
+    if(st.rs==='restarts') return (b.restarts||0)-(a.restarts||0);
+    if(st.rs==='ns')       return (a.ns+a.name).localeCompare(b.ns+b.name);
+    if(st.rs==='node')     return (a.node+a.name).localeCompare(b.node+b.name);
+    return a.name.localeCompare(b.name);
+  });
+
+  if(cnt)cnt.textContent='('+pods.length+')';
+  if(!pods.length){el.innerHTML='<p class="empty">No pods found.</p>';return;}
+
+  var rows=pods.map(function(p){
+    var phaseCol=p.phase==='Running'?'var(--grn)':p.phase==='Pending'?'var(--yel)':'var(--red)';
+    var readyIcon=p.ready?'<span style="color:var(--grn)">&#10003;</span>':'<span style="color:var(--red)">&#10007;</span>';
+    var lastRst=p.last_restart_ts
+      ?'<span title="'+esc(p.last_restart_ts)+'" style="color:var(--org)">'+esc(p.last_restart_ago)+' ago</span>'
+      :'<span class="mu">—</span>';
+    /* shorten node: show last octet only (10.50.1.33 → .33) */
+    var nodeShort=p.node&&p.node!=='—'
+      ?'<span title="'+esc(p.node)+'" class="mono" style="font-size:10px">'+esc(p.node)+'</span>'
+      :'<span class="mu">—</span>';
+    return '<tr>'+
+      '<td class="mono" style="max-width:260px;word-break:break-all">'+esc(p.name)+'</td>'+
+      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:10px">'+esc(p.ns)+'</span></td>'+
+      '<td>'+nodeShort+'</td>'+
+      '<td style="color:'+phaseCol+'">'+readyIcon+' '+esc(p.phase)+'</td>'+
+      '<td style="text-align:center">'+rstBadge(p.restarts)+'</td>'+
+      '<td>'+lastRst+'</td>'+
+      '<td class="mono mu">'+fmtCpuM(p.cpu_req_m||0)+'</td>'+
+      '<td class="mono mu">'+fmtMemGi(p.mem_req_mi||0)+'</td>'+
+      '<td class="mono mu">'+esc(p.age||'—')+'</td>'+
+      '</tr>';
+  });
+  el.innerHTML='<table><thead><tr>'+
+    '<th>Pod</th><th>Namespace</th><th>Node</th><th>Status</th>'+
+    '<th>Restarts</th><th>Last Restart</th><th>CPU Req</th><th>RAM Req</th><th>Age</th>'+
+    '</tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+}
+
+/* ── Namespace Cost Attribution ──────────────────────────────────── */
+function renderCost(data){
+  var el=document.getElementById('cost-table');
+  var me=document.getElementById('cost-methodology');
+  if(!el||!data||!data.cost)return;
+  var c=data.cost;
+  var byNs=c.by_ns||{};
+  var nsList=Object.keys(byNs).sort(function(a,b){
+    return (byNs[b].cost_month||0)-(byNs[a].cost_month||0);
+  });
+  if(!nsList.length){el.innerHTML='<p class="empty">No pod data yet.</p>';return;}
+
+  /* find max cost for bar scaling */
+  var maxCost=Math.max.apply(null,nsList.map(function(ns){return byNs[ns].cost_month||0;}));
+  if(!maxCost)maxCost=1;
+
+  var totalCost=0;
+  nsList.forEach(function(ns){totalCost+=(byNs[ns].cost_month||0);});
+
+  var rows=nsList.map(function(ns,idx){
+    var n=byNs[ns];
+    var barW=Math.max(2,Math.round((n.cost_month/maxCost)*100));
+    var barCol=NS_PAL[idx%NS_PAL.length];
+    var domLabel=n.cpu_pct>=n.mem_pct
+      ?'<span title="CPU-bound" style="color:var(--blu);font-size:10px">&#9650; CPU</span>'
+      :'<span title="Memory-bound" style="color:var(--org);font-size:10px">&#9650; RAM</span>';
+    return '<tr>'+
+      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(ns)+'</span></td>'+
+      '<td style="text-align:center" class="mono mu">'+n.pods+'</td>'+
+      '<td class="mono mu">'+fmtCpuM(n.cpu_req_m||0)+'</td>'+
+      '<td class="mono mu">'+fmtMemGi(n.mem_req_mi||0)+'</td>'+
+      '<td class="mono mu">'+n.cpu_pct+'%</td>'+
+      '<td class="mono mu">'+n.mem_pct+'%</td>'+
+      '<td>'+domLabel+'</td>'+
+      '<td class="mono mu">'+n.node_equiv+' nodes</td>'+
+      '<td>'+
+        '<div class="cost-bar-wrap"><div class="cost-bar" style="width:'+barW+'%;background:'+barCol+'"></div></div>'+
+      '</td>'+
+      '<td class="mono" style="font-weight:700;color:'+barCol+'">$'+n.cost_month.toFixed(2)+'</td>'+
+      '</tr>';
+  });
+
+  /* totals row */
+  rows.push('<tr style="border-top:2px solid var(--bd)">'+
+    '<td style="font-weight:700;color:var(--tx)">TOTAL</td>'+
+    '<td></td><td></td><td></td><td></td><td></td><td></td>'+
+    '<td class="mono mu">'+c.total_nodes+' nodes</td>'+
+    '<td></td>'+
+    '<td class="mono" style="font-weight:700;color:var(--tx)">$'+c.total_cost_month.toFixed(2)+'</td>'+
+    '</tr>');
+
+  el.innerHTML='<table><thead><tr>'+
+    '<th>Namespace</th><th>Pods</th><th>CPU Req</th><th>RAM Req</th>'+
+    '<th>CPU %</th><th>RAM %</th><th>Driver</th>'+
+    '<th>Node Equiv</th><th style="min-width:80px">Cost</th><th>$/month</th>'+
+    '</tr></thead><tbody>'+rows.join('')+'</tbody></table>';
+
+  /* methodology note */
+  if(me){
+    me.innerHTML='<b>Methodology</b> &nbsp;&#8212;&nbsp; '+
+      'Instance: '+esc(c.oci_instance)+
+      ' ('+c.ocpu_per_node+' OCPU + '+c.ram_gi_per_node+' Gi RAM)&nbsp;'+
+      ' &middot; Pay-as-you-go: $'+c.price_ocpu_hr+'/OCPU-hr + $'+c.price_ram_gb_hr+'/GB-hr&nbsp;'+
+      ' &middot; Node cost: <b>$'+c.node_cost_month+'/month</b>&nbsp;'+
+      ' &middot; '+c.total_nodes+' nodes &times; $'+c.node_cost_month+' = <b>$'+c.total_cost_month+'/month</b>&nbsp;'+
+      ' &middot; Namespace share = max(CPU req %, RAM req %) of cluster allocatable.'+
+      ' Override pricing via env vars <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>.';
+  }
+}
+
 /* ── progress bar + auto-refresh ─────────────────────────────────── */
 function tick(){
   _el++;
@@ -2096,6 +2453,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 "biz":       biz,
                 "snaps":     _metrics_collector.pod_timeline(rng, biz),
             }, default=str).encode()
+            self._serve(body, "application/json")
+
+        elif path == "/api/pod-restarts":
+            body = json.dumps(_pod_restart_snapshot(), default=str).encode()
             self._serve(body, "application/json")
 
         else:
