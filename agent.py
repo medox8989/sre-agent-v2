@@ -844,22 +844,32 @@ class MetricsCollector:
     Collects per-namespace real CPU/memory usage (pod metrics), per-node real
     usage vs. allocatable, and cluster-wide real/requests/limits summaries.
 
-    Stores a rolling 24-hour time-series of namespace-level snapshots.
+    Stores multiple rolling time-series:
+      _ns_snaps     — 24 h @ 60 s resolution  (CPU, RAM, pod count per ns)
+      _pod_snaps_10m — 7 d @ 10 min resolution (pod count per ns)
+      _pod_snaps_1h  — 30 d @ 1 h  resolution (pod count per ns)
+
     Degrades gracefully when metrics-server is not installed — returns empty
     data and sets available=False rather than raising.
     """
-    MAX_AGE_HOURS = 24
-    MAX_SNAPS     = 300
+    MAX_AGE_HOURS  = 24
+    MAX_SNAPS      = 300
+    MAX_10M_SNAPS  = 1010   # 7 d × 24 h × 6/h + margin
+    MAX_1H_SNAPS   =  730   # 30 d × 24 h + margin
 
     def __init__(self, poll_interval: int = 60):
-        self._lock              = threading.Lock()
-        self._ns_snaps: deque   = deque()   # [{ts, cpu:{ns→m}, mem:{ns→mi}}]
-        self._node_snap: List   = []        # current per-node metrics
-        self._global_snap: Dict = {}        # current cluster-wide summary
-        self._available         = False     # True after first successful poll
-        self._poll_interval     = poll_interval
-        self._custom            = None      # cached CustomObjectsApi
-        self._core_m            = None      # cached CoreV1Api (metrics client)
+        self._lock               = threading.Lock()
+        self._ns_snaps: deque    = deque()   # [{ts, cpu:{ns→m}, mem:{ns→mi}, pods:{ns→n}}]
+        self._pod_snaps_10m: deque = deque() # [{ts, pods:{ns→n}}]  10-min resolution, 7 d
+        self._pod_snaps_1h:  deque = deque() # [{ts, pods:{ns→n}}]  1-h  resolution, 30 d
+        self._last_10m_ts: str   = ""        # last ts written to _pod_snaps_10m
+        self._last_1h_ts:  str   = ""        # last ts written to _pod_snaps_1h
+        self._node_snap: List    = []        # current per-node metrics
+        self._global_snap: Dict  = {}        # current cluster-wide summary
+        self._available          = False     # True after first successful poll
+        self._poll_interval      = poll_interval
+        self._custom             = None      # cached CustomObjectsApi
+        self._core_m             = None      # cached CoreV1Api (metrics client)
 
     def start(self) -> None:
         t = threading.Thread(target=self._run, name="metrics-collector", daemon=True)
@@ -1006,15 +1016,18 @@ class MetricsCollector:
                 ns_cpu_real[ns] = ns_cpu_real.get(ns, 0) + _cpu(u.get("cpu", "0"))
                 ns_mem_real[ns] = ns_mem_real.get(ns, 0) + _mem(u.get("memory", "0"))
 
-        # ── Pod requests + limits from pod specs ─────────────────────────
+        # ── Pod requests + limits from pod specs + pod count per namespace ──
         total_cpu_req_m  = 0
         total_mem_req_mi = 0
         total_cpu_lim_m  = 0
         total_mem_lim_mi = 0
+        ns_pod_count: Dict[str, int] = {}  # running/pending pod count per namespace
         try:
             for pod in core.list_pod_for_all_namespaces(limit=500).items:
                 if (pod.status.phase or "") not in ("Running", "Pending"):
                     continue
+                ns = pod.metadata.namespace
+                ns_pod_count[ns] = ns_pod_count.get(ns, 0) + 1
                 for c in (pod.spec.containers or []):
                     res  = c.resources or type("R", (), {"requests": None, "limits": None})()
                     reqs = res.requests or {}
@@ -1054,11 +1067,71 @@ class MetricsCollector:
             self._node_snap   = node_snap
             self._global_snap = global_snap
             self._available   = True
-            self._ns_snaps.append({"ts": ts, "cpu": dict(ns_cpu_real), "mem": dict(ns_mem_real)})
+            # 60-second resolution store (24 h)
+            self._ns_snaps.append({
+                "ts":   ts,
+                "cpu":  dict(ns_cpu_real),
+                "mem":  dict(ns_mem_real),
+                "pods": dict(ns_pod_count),
+            })
             while self._ns_snaps and self._ns_snaps[0]["ts"] < cutoff:
                 self._ns_snaps.popleft()
             while len(self._ns_snaps) > self.MAX_SNAPS:
                 self._ns_snaps.popleft()
+
+            # 10-minute resolution store (7 d) — for weekly pod timeline
+            if (not self._last_10m_ts or
+                    _iso_age_secs(ts, self._last_10m_ts) >= 600):
+                pod_snap = {"ts": ts, "pods": dict(ns_pod_count)}
+                self._pod_snaps_10m.append(pod_snap)
+                self._last_10m_ts = ts
+                cutoff_7d = (_now() - timedelta(days=7)).isoformat()
+                while self._pod_snaps_10m and self._pod_snaps_10m[0]["ts"] < cutoff_7d:
+                    self._pod_snaps_10m.popleft()
+                while len(self._pod_snaps_10m) > self.MAX_10M_SNAPS:
+                    self._pod_snaps_10m.popleft()
+
+            # 1-hour resolution store (30 d) — for monthly pod timeline
+            if (not self._last_1h_ts or
+                    _iso_age_secs(ts, self._last_1h_ts) >= 3600):
+                pod_snap = {"ts": ts, "pods": dict(ns_pod_count)}
+                self._pod_snaps_1h.append(pod_snap)
+                self._last_1h_ts = ts
+                cutoff_30d = (_now() - timedelta(days=30)).isoformat()
+                while self._pod_snaps_1h and self._pod_snaps_1h[0]["ts"] < cutoff_30d:
+                    self._pod_snaps_1h.popleft()
+                while len(self._pod_snaps_1h) > self.MAX_1H_SNAPS:
+                    self._pod_snaps_1h.popleft()
+
+    def pod_timeline(self, range_str: str = "1d", business_only: bool = False) -> List[Dict]:
+        """Return pod-count snapshots for the requested time range.
+
+        range_str:     "1d"  → 24 h window, 60-second samples (up to 300 pts)
+                       "1w"  → 7-day window, 10-minute samples (up to 1010 pts)
+                       "1m"  → 30-day window, 1-hour samples  (up to 730 pts)
+        business_only: if True, keep only snapshots where UTC hour in [8..17)
+        """
+        with self._lock:
+            if range_str == "1w":
+                snaps = [{"ts": s["ts"], "pods": dict(s["pods"])}
+                         for s in self._pod_snaps_10m]
+            elif range_str == "1m":
+                snaps = [{"ts": s["ts"], "pods": dict(s["pods"])}
+                         for s in self._pod_snaps_1h]
+            else:  # "1d" — from high-res store
+                snaps = [{"ts": s["ts"], "pods": dict(s.get("pods", {}))}
+                         for s in self._ns_snaps]
+
+        if business_only:
+            def _is_biz(ts_str: str) -> bool:
+                try:
+                    h = int(ts_str[11:13])   # UTC hour from "YYYY-MM-DDTHH:MM:SS"
+                    return 8 <= h < 17
+                except Exception:
+                    return True
+            snaps = [s for s in snaps if _is_biz(s["ts"])]
+
+        return snaps
 
     def ns_history(self, hours: float = 1.0) -> List[Dict]:
         cutoff = (_now() - timedelta(hours=hours)).isoformat()
@@ -1177,6 +1250,8 @@ tr:hover td{background:var(--bg3);}
 .chart-inner{width:100%;overflow:hidden;}
 .chart-legend{padding:6px 0 0;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;}
 .chart-legend span{display:inline-flex;align-items:center;gap:4px;}
+.pod-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;}
+.pod-tg-label{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.06em;margin-right:2px;}
 .res-unavail{color:var(--yel);background:rgba(227,179,65,.08);border:1px solid rgba(227,179,65,.25);
              border-radius:6px;padding:8px 14px;font-size:12px;margin-bottom:12px;display:none;}
 </style>
@@ -1229,6 +1304,28 @@ tr:hover td{background:var(--bg3);}
   </div>
 </section>
 
+<!-- ── Pod Count Timeline ─────────────────────────────────────────── -->
+<section>
+  <h2>&#128200; Pod Count by Namespace</h2>
+  <div class="pod-toolbar">
+    <span class="pod-tg-label">Range</span>
+    <button class="btn on" id="pr-1d" onclick="setPodOpt('range','1d')">1 Day</button>
+    <button class="btn"    id="pr-1w" onclick="setPodOpt('range','1w')">1 Week</button>
+    <button class="btn"    id="pr-1m" onclick="setPodOpt('range','1m')">1 Month</button>
+    &nbsp;
+    <span class="pod-tg-label">Hours</span>
+    <button class="btn on" id="pb-all" onclick="setPodOpt('biz','0')">All 24 h</button>
+    <button class="btn"    id="pb-biz" onclick="setPodOpt('biz','1')">Business 08-17 UTC</button>
+    &nbsp;
+    <span class="mu" id="pod-snap-info" style="font-size:10px"></span>
+  </div>
+  <div id="pod-chart"></div>
+  <div id="pod-legend" class="chart-legend" style="margin-top:6px"></div>
+  <div id="pod-tt" style="position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;
+    padding:8px 12px;font-size:11px;pointer-events:none;display:none;z-index:999;
+    min-width:160px;max-width:300px;box-shadow:0 4px 16px rgba(0,0,0,.5);line-height:1.7"></div>
+</section>
+
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
 <section>
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
@@ -1256,7 +1353,7 @@ tr:hover td{background:var(--bg3);}
 </section>
 
 <script>
-var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{}};  /* mn = metrics nodes keyed by name */
+var st={h:1,sv:{C:1,W:1,I:1},d:null,ne:[],mn:{},pr:'1d',pb:'0'};  /* pr=pod-range pb=pod-biz */
 var RSEC=60,_el=0;
 
 /* ── utilities ────────────────────────────────────────────────────── */
@@ -1680,6 +1777,227 @@ function fetchAll(){
   });
   fetch('/api/node-events?hours='+st.h).then(function(r){return r.json();}).then(function(ne){st.ne=ne;renderNE(ne);}).catch(function(){});
   fetch('/api/ns-metrics?hours='+st.h).then(function(r){return r.json();}).then(renderMetrics).catch(function(){});
+  fetchPodTimeline();
+}
+
+/* ── Pod timeline fetch + render ─────────────────────────────────── */
+function fetchPodTimeline(){
+  fetch('/api/pod-timeline?range='+st.pr+'&biz='+st.pb)
+    .then(function(r){return r.json();})
+    .then(renderPodTimeline)
+    .catch(function(){});
+}
+
+function setPodOpt(key,val){
+  if(key==='range'){
+    st.pr=val;
+    ['1d','1w','1m'].forEach(function(v){
+      var b=document.getElementById('pr-'+v);if(b)b.className='btn'+(v===val?' on':'');
+    });
+  } else {
+    st.pb=val;
+    ['all','biz'].forEach(function(v){
+      var b=document.getElementById('pb-'+v);
+      if(b)b.className='btn'+(v===(val==='0'?'all':'biz')?' on':'');
+    });
+  }
+  fetchPodTimeline();
+}
+
+/* ── Pod timeline SVG renderer ───────────────────────────────────── */
+function renderPodTimeline(data){
+  var el=document.getElementById('pod-chart');
+  var le=document.getElementById('pod-legend');
+  var info=document.getElementById('pod-snap-info');
+  if(!el)return;
+
+  if(!data||!data.available){
+    el.innerHTML='<p class="empty">&#9888; metrics-server not available — pod count timeline requires it.</p>';
+    if(le)le.innerHTML='';return;
+  }
+  var snaps=data.snaps||[];
+  if(snaps.length<2){
+    el.innerHTML='<p class="empty">Collecting data&hellip; timeline available after the second sample.</p>';
+    if(le)le.innerHTML='';return;
+  }
+  if(info)info.textContent=snaps.length+' samples';
+
+  /* ── collect all namespaces, rank by max pod count ── */
+  var nsMax={};
+  snaps.forEach(function(s){
+    Object.entries(s.pods||{}).forEach(function(kv){
+      nsMax[kv[0]]=(nsMax[kv[0]]||0)<kv[1]?kv[1]:(nsMax[kv[0]]||0);
+    });
+  });
+  var allNs=Object.keys(nsMax).sort(function(a,b){return nsMax[b]-nsMax[a];});
+  var MAX_NS=9;  /* top 9 individually; rest → "other" */
+  var topNs=allNs.slice(0,MAX_NS);
+  var hasOther=allNs.length>MAX_NS;
+
+  /* build display list: topNs + optionally "other" */
+  var nsList=topNs.slice();
+  if(hasOther)nsList.push('other');
+
+  /* ── SVG dimensions ── */
+  var W=900,H=240,PL=42,PR=14,PT=16,PB=36;
+  var cw=W-PL-PR,ch=H-PT-PB;
+
+  var times=snaps.map(function(s){return new Date(s.ts).getTime();});
+  var t0=times[0],t1=times[times.length-1];
+  if(t1===t0)t1=t0+60000;
+
+  /* compute pod values per namespace per snap (with "other" aggregation) */
+  var seriesData={};
+  nsList.forEach(function(ns){seriesData[ns]=[];});
+  snaps.forEach(function(s,i){
+    var pods=s.pods||{};
+    topNs.forEach(function(ns){seriesData[ns].push(pods[ns]||0);});
+    if(hasOther){
+      var others=0;
+      Object.entries(pods).forEach(function(kv){
+        if(topNs.indexOf(kv[0])<0)others+=kv[1];
+      });
+      seriesData['other'].push(others);
+    }
+  });
+
+  var maxV=0;
+  nsList.forEach(function(ns){
+    seriesData[ns].forEach(function(v){if(v>maxV)maxV=v;});
+  });
+  if(!maxV)maxV=1;
+
+  function px(t){return PL+(t-t0)/(t1-t0)*cw;}
+  function py(v){return PT+ch*(1-v/maxV);}
+
+  /* ── grid + y-axis ── */
+  var gridLines='',yLbls='';
+  var yTicks=4;
+  for(var i=0;i<=yTicks;i++){
+    var v=Math.round(maxV*i/yTicks),y=py(v);
+    gridLines+='<line x1="'+PL+'" y1="'+y.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+y.toFixed(1)+
+      '" stroke="#1c2128" stroke-width="1"/>';
+    yLbls+='<text x="'+(PL-4)+'" y="'+(y+3.5).toFixed(1)+
+      '" text-anchor="end" font-size="9" fill="#8b949e">'+v+'</text>';
+  }
+
+  /* ── x-axis with time labels ── */
+  var baseY=(PT+ch).toFixed(1);
+  var xAxis='<line x1="'+PL+'" y1="'+baseY+'" x2="'+(W-PR)+'" y2="'+baseY+
+    '" stroke="#30363d" stroke-width="1"/>';
+  var xTicks=6;
+  for(var j=0;j<=xTicks;j++){
+    var tx=PL+cw*j/xTicks;
+    var tt=t0+(t1-t0)*j/xTicks;
+    var dtx=new Date(tt);
+    /* label format: HH:MM for 1d; Mon DD for 1w/1m */
+    var lbl;
+    if(data.range==='1d'){
+      lbl=('0'+dtx.getUTCHours()).slice(-2)+':'+('0'+dtx.getUTCMinutes()).slice(-2);
+    } else if(data.range==='1w'){
+      var days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      lbl=days[dtx.getUTCDay()]+' '+dtx.getUTCDate();
+    } else {
+      var months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      lbl=months[dtx.getUTCMonth()]+' '+dtx.getUTCDate();
+    }
+    xAxis+='<line x1="'+tx.toFixed(1)+'" y1="'+baseY+'" x2="'+tx.toFixed(1)+
+      '" y2="'+(Number(baseY)+4)+'" stroke="#484f58" stroke-width="1"/>';
+    xAxis+='<text x="'+tx.toFixed(1)+'" y="'+(Number(baseY)+14)+
+      '" text-anchor="middle" font-size="9" fill="#8b949e">'+lbl+'</text>';
+  }
+
+  /* ── business-hours shade bands (for 1d range only) ── */
+  var bizBands='';
+  if(!data.biz && data.range==='1d'){
+    /* shade non-business hours (0-8 and 17-24) lightly */
+    snaps.forEach(function(s,i){
+      if(i===snaps.length-1)return;
+      var h=new Date(s.ts).getUTCHours();
+      if(h<8||h>=17){
+        var x1=px(times[i]),x2=px(times[i+1]);
+        bizBands+='<rect x="'+x1.toFixed(1)+'" y="'+PT+'" width="'+(x2-x1).toFixed(1)+
+          '" height="'+ch+'" fill="#ffffff" fill-opacity="0.025"/>';
+      }
+    });
+  }
+
+  /* ── area + line paths ── */
+  var areas='',lines='';
+  nsList.forEach(function(ns,idx){
+    var col=ns==='other'?'#4d5566':NS_PAL[idx%NS_PAL.length];
+    var pts=seriesData[ns].map(function(v,i){
+      return {x:px(times[i]),y:py(v)};
+    });
+    /* area path: down to baseline and back */
+    var areaD='M'+pts[0].x.toFixed(1)+','+baseY;
+    pts.forEach(function(p){areaD+=' L'+p.x.toFixed(1)+','+p.y.toFixed(1);});
+    areaD+=' L'+pts[pts.length-1].x.toFixed(1)+','+baseY+' Z';
+    areas+='<path d="'+areaD+'" fill="'+col+'" fill-opacity="0.13"/>';
+    /* line path */
+    var lineD=pts.map(function(p,i){
+      return (i===0?'M':'L')+p.x.toFixed(1)+' '+p.y.toFixed(1);
+    }).join(' ');
+    lines+='<path d="'+lineD+'" fill="none" stroke="'+col+
+      '" stroke-width="1.8" stroke-linejoin="round"/>';
+  });
+
+  /* ── invisible hover overlay ── */
+  var overlay='<rect id="pod-hover-rect" x="'+PL+'" y="'+PT+'" width="'+cw+'" height="'+ch+
+    '" fill="transparent" style="cursor:crosshair"/>'+
+    '<line id="pod-crosshair" x1="0" y1="'+PT+'" x2="0" y2="'+(PT+ch)+
+    '" stroke="#58a6ff" stroke-width="1" stroke-dasharray="3,2" visibility="hidden"/>';
+
+  var svgHtml='<svg id="pod-svg" viewBox="0 0 '+W+' '+H+'" width="100%" style="display:block;overflow:visible">'+
+    '<rect width="'+W+'" height="'+H+'" fill="#161b22" rx="4"/>'+
+    bizBands+gridLines+yLbls+xAxis+areas+lines+overlay+'</svg>';
+  el.innerHTML=svgHtml;
+
+  /* ── legend ── */
+  if(le){
+    le.innerHTML=nsList.map(function(ns,idx){
+      var col=ns==='other'?'#4d5566':NS_PAL[idx%NS_PAL.length];
+      var cur=seriesData[ns][seriesData[ns].length-1]||0;
+      return '<span><span style="color:'+col+';font-size:14px">&#9632;</span> '+
+        '<span style="color:var(--tx)">'+esc(ns)+'</span>'+
+        '<span class="mu">&nbsp;now:'+cur+'</span></span>';
+    }).join('');
+  }
+
+  /* ── hover tooltip ── */
+  var svgEl=document.getElementById('pod-svg');
+  var ttEl=document.getElementById('pod-tt');
+  var ch2=document.getElementById('pod-crosshair');
+  if(!svgEl||!ttEl)return;
+
+  function podHover(evt){
+    var rect=svgEl.getBoundingClientRect();
+    var svgX=(evt.clientX-rect.left)*(W/rect.width)-PL;
+    if(svgX<0||svgX>cw){ttEl.style.display='none';if(ch2)ch2.setAttribute('visibility','hidden');return;}
+    var frac=svgX/cw;
+    var ti=Math.min(Math.round(frac*(snaps.length-1)),snaps.length-1);
+    var snap=snaps[ti];
+    /* crosshair */
+    if(ch2){var cx=PL+frac*cw;ch2.setAttribute('x1',cx.toFixed(1));ch2.setAttribute('x2',cx.toFixed(1));ch2.setAttribute('visibility','visible');}
+    /* tooltip content */
+    var html='<div style="color:var(--mu);font-size:10px;margin-bottom:5px">'+
+      snap.ts.substring(0,19).replace('T',' ')+' UTC</div>';
+    nsList.forEach(function(ns,idx){
+      var col=ns==='other'?'#4d5566':NS_PAL[idx%NS_PAL.length];
+      var cnt=seriesData[ns][ti]||0;
+      html+='<div><span style="color:'+col+'">&#9632;</span> '+
+        esc(ns)+': <b style="color:var(--tx)">'+cnt+'</b></div>';
+    });
+    ttEl.innerHTML=html;
+    ttEl.style.display='block';
+    /* position: flip left if near right edge */
+    var ttW=200,vw=window.innerWidth;
+    ttEl.style.left=(evt.clientX+14+ttW>vw?evt.clientX-ttW-8:evt.clientX+14)+'px';
+    ttEl.style.top=(evt.clientY-10)+'px';
+  }
+  function podLeave(){ttEl.style.display='none';if(ch2)ch2.setAttribute('visibility','hidden');}
+  svgEl.addEventListener('mousemove',podHover);
+  svgEl.addEventListener('mouseleave',podLeave);
 }
 
 /* ── progress bar + auto-refresh ─────────────────────────────────── */
@@ -1766,6 +2084,17 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 "global":    _metrics_collector.global_current(),
                 "nodes":     _metrics_collector.node_current(),
                 "snaps":     _metrics_collector.ns_history(h),
+            }, default=str).encode()
+            self._serve(body, "application/json")
+
+        elif path == "/api/pod-timeline":
+            rng = params.get("range", "1d")
+            biz = params.get("biz", "0") == "1"
+            body = json.dumps({
+                "available": _metrics_collector.available(),
+                "range":     rng,
+                "biz":       biz,
+                "snaps":     _metrics_collector.pod_timeline(rng, biz),
             }, default=str).encode()
             self._serve(body, "application/json")
 
@@ -1948,6 +2277,15 @@ def _is_odoo_deployment(dep) -> bool:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+def _iso_age_secs(newer_iso: str, older_iso: str) -> float:
+    """Return seconds between two ISO-8601 strings. Returns 0 on parse error."""
+    try:
+        a = datetime.fromisoformat(newer_iso.replace("Z", "+00:00"))
+        b = datetime.fromisoformat(older_iso.replace("Z", "+00:00"))
+        return (a - b).total_seconds()
+    except Exception:
+        return 0.0
 
 def _age(dt) -> str:
     if dt is None: return "?"
