@@ -75,21 +75,23 @@ spec:
               protocol: TCP
 
           # ── Resource limits ──────────────────────────────────────────────
-          # Memory breakdown:
-          #   Python runtime + kubernetes client:  ~40 MB
-          #   DataStore (1 full report + 300 summary entries): ~10-30 MB
-          #   NodeWatcher event buffer + _known map: ~1 MB
-          #   Slack / request in-flight buffers:   ~5 MB
-          #   Total expected peak:                 ~60-80 MB
-          # Request set to 192Mi for headroom above the peak, limit at 256Mi.
+          # Memory breakdown (v5):
+          #   Python 3.11 runtime + alpine base:        ~30 MB
+          #   kubernetes + requests client libs:         ~55 MB
+          #   MetricsCollector (3 deques, 24h/7d/30d):  ~5–15 MB
+          #   Embedded HTML dashboard template:          ~2 MB
+          #   Pod restart + cost cache:                  ~5 MB
+          #   In-flight request buffers + slack:         ~5 MB
+          #   Total expected peak:                       ~120–150 MB
+          # Request set to 256Mi, limit at 512Mi for safety headroom.
           resources:
             requests:
               cpu: 50m
-              memory: 192Mi
+              memory: 256Mi
               ephemeral-storage: 100Mi
             limits:
-              cpu: 200m
-              memory: 256Mi
+              cpu: 300m
+              memory: 512Mi
               ephemeral-storage: 300Mi
 
           # ── Liveness: HTTP GET /health — confirms the metrics server is alive ──
