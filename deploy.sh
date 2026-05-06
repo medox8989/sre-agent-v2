@@ -34,7 +34,7 @@
 #   proptech-prod
 #     Registry : me-riyadh-1.ocir.io
 #     Tenancy  : axtgrwsd46af
-#     Repo     : oke-lite-images
+#     Repo     : proptech-odoo-images
 #     ocir-secret: created from env vars OCIR_PASSWORD (+ OCIR_USERNAME optional)
 #
 # ── Env var overrides (all clusters) ─────────────────────────────────────────
@@ -81,7 +81,7 @@ case "$CLUSTER" in
   proptech-prod)
     OCIR_REGISTRY="me-riyadh-1.ocir.io"
     OCIR_TENANCY="axtgrwsd46af"
-    OCIR_REPO="oke-lite-images"
+    OCIR_REPO="proptech-odoo-images"
     OCIR_SECRET_MODE="create"                        # create from credentials
     OCIR_USERNAME="${OCIR_USERNAME:-axtgrwsd46af/devops@arribatt.com}"
     OCIR_EMAIL="${OCIR_EMAIL:-devops@arribatt.com}"
