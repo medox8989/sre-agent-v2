@@ -114,7 +114,7 @@ fi
 # ── Build & push mode ─────────────────────────────────────────────────────────
 if [[ "${1:-}" == "build" ]]; then
   echo "→ Building image: $OCIR_IMAGE"
-  docker build -t "$OCIR_IMAGE" "$SCRIPT_DIR"
+  docker build --platform linux/amd64 -t "$OCIR_IMAGE" "$SCRIPT_DIR"
 
   echo "→ Pushing to OCIR..."
   echo "   (If this fails with 403, run: docker login $OCIR_REGISTRY)"
