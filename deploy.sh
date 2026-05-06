@@ -31,6 +31,12 @@
 #     Repo     : proptech-odoo-images
 #     ocir-secret: created from env vars OCIR_PASSWORD (+ OCIR_USERNAME optional)
 #
+#   proptech-prod
+#     Registry : me-riyadh-1.ocir.io
+#     Tenancy  : axtgrwsd46af
+#     Repo     : oke-lite-images
+#     ocir-secret: created from env vars OCIR_PASSWORD (+ OCIR_USERNAME optional)
+#
 # ── Env var overrides (all clusters) ─────────────────────────────────────────
 #   IMAGE_TAG=sre-agent-v5       override image tag
 #   SLACK_WEBHOOK_URL=https://…  set Slack webhook
@@ -72,9 +78,17 @@ case "$CLUSTER" in
     OCIR_USERNAME="${OCIR_USERNAME:-axtgrwsd46af/devops@arribatt.com}"
     OCIR_EMAIL="${OCIR_EMAIL:-devops@arribatt.com}"
     ;;
+  proptech-prod)
+    OCIR_REGISTRY="me-riyadh-1.ocir.io"
+    OCIR_TENANCY="axtgrwsd46af"
+    OCIR_REPO="oke-lite-images"
+    OCIR_SECRET_MODE="create"                        # create from credentials
+    OCIR_USERNAME="${OCIR_USERNAME:-axtgrwsd46af/devops@arribatt.com}"
+    OCIR_EMAIL="${OCIR_EMAIL:-devops@arribatt.com}"
+    ;;
   *)
     echo "❌ Unknown cluster: '$CLUSTER'"
-    echo "   Valid values: jamiat, proptech-lite, awqaf"
+    echo "   Valid values: jamiat, proptech-lite, awqaf, proptech-prod"
     exit 1
     ;;
 esac
