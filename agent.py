@@ -1194,6 +1194,12 @@ def _pod_restart_snapshot() -> Dict:
     RAM_GI_PER_NODE  = float(_os.environ.get("OCI_RAM_GI_PER_NODE", "15.3"))
     OCI_INSTANCE     = _os.environ.get("OCI_INSTANCE_TYPE", "VM.Standard.E5.Flex")
 
+    # OCI Universal Credit commitment discounts (public rates, Oct 2024)
+    # 1-year  ≈ 33 % off PAYG   3-year  ≈ 46 % off PAYG
+    # Override with OCI_COMMIT_1Y_DISCOUNT / OCI_COMMIT_3Y_DISCOUNT (0-1 float)
+    COMMIT_1Y_DISC = float(_os.environ.get("OCI_COMMIT_1Y_DISCOUNT", "0.33"))
+    COMMIT_3Y_DISC = float(_os.environ.get("OCI_COMMIT_3Y_DISCOUNT", "0.46"))
+
     node_cost_hr    = (OCPU_PER_NODE * OCPU_PRICE_HR) + (RAM_GI_PER_NODE * RAM_GB_PRICE_HR)
     node_cost_month = round(node_cost_hr * 24 * 30, 2)
 
@@ -1327,17 +1333,22 @@ def _pod_restart_snapshot() -> Dict:
         result = {
             "pods": pods,
             "cost": {
-                "oci_instance":        OCI_INSTANCE,
-                "ocpu_per_node":       OCPU_PER_NODE,
-                "ram_gi_per_node":     RAM_GI_PER_NODE,
-                "price_ocpu_hr":       OCPU_PRICE_HR,
-                "price_ram_gb_hr":     RAM_GB_PRICE_HR,
-                "node_cost_month":     node_cost_month,
-                "total_nodes":         node_count,
-                "total_cost_month":    total_cost_month,
-                "cluster_cpu_alloc_m": cluster_cpu_m,
-                "cluster_mem_alloc_mi":cluster_mem_mi,
-                "by_ns":               by_ns,
+                "oci_instance":           OCI_INSTANCE,
+                "ocpu_per_node":          OCPU_PER_NODE,
+                "ram_gi_per_node":        RAM_GI_PER_NODE,
+                "price_ocpu_hr":          OCPU_PRICE_HR,
+                "price_ram_gb_hr":        RAM_GB_PRICE_HR,
+                "node_cost_month":        node_cost_month,
+                "total_nodes":            node_count,
+                "total_cost_month":       total_cost_month,
+                # OCI Universal Credit commitment totals
+                "commit_1y_discount":     COMMIT_1Y_DISC,
+                "commit_3y_discount":     COMMIT_3Y_DISC,
+                "total_cost_1y_month":    round(total_cost_month * (1 - COMMIT_1Y_DISC), 2),
+                "total_cost_3y_month":    round(total_cost_month * (1 - COMMIT_3Y_DISC), 2),
+                "cluster_cpu_alloc_m":    cluster_cpu_m,
+                "cluster_mem_alloc_mi":   cluster_mem_mi,
+                "by_ns":                  by_ns,
             },
         }
 
@@ -1441,11 +1452,19 @@ tr:hover td{background:var(--bg3);}
 .nbar-lbl{width:28px;font-size:9px;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;text-align:right;flex-shrink:0;}
 .nbar-val{min-width:44px;font-size:11px;font-weight:700;text-align:right;flex-shrink:0;}
 /* ── SVG charts ────────────────────────────────────────────────────── */
-.chart-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:12px 14px;margin-bottom:12px;}
+.charts-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
+@media(max-width:900px){.charts-row{grid-template-columns:1fr;}}
+.chart-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:12px 14px;}
 .chart-title{font-size:11px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px;}
 .chart-inner{width:100%;overflow:hidden;}
-.chart-legend{padding:6px 0 0;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;}
-.chart-legend span{display:inline-flex;align-items:center;gap:4px;}
+/* compact legend: color-dot + name only; stats appear in hover tooltip */
+.chart-legend{padding:5px 0 0;display:flex;flex-wrap:wrap;gap:3px 10px;font-size:11px;}
+.chart-legend span{display:inline-flex;align-items:center;gap:3px;cursor:default;opacity:.85;transition:opacity .12s;}
+.chart-legend span:hover{opacity:1;}
+/* shared hover tooltip for both charts */
+#chart-tt{position:fixed;background:#1c2128;border:1px solid #30363d;border-radius:6px;
+          padding:8px 13px;font-size:12px;pointer-events:none;display:none;z-index:999;
+          min-width:170px;box-shadow:0 4px 20px rgba(0,0,0,.6);line-height:1.65;}
 .pod-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding:8px 10px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;}
 .pod-tg-label{font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:.06em;margin-right:2px;}
 .rst-badge{display:inline-block;min-width:28px;text-align:center;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;}
@@ -1513,19 +1532,22 @@ tr:hover td{background:var(--bg3);}
   <div class="res-grid" id="global-bars"></div>
   <!-- Per-node CPU + RAM progress bars -->
   <div id="node-bars"></div>
-  <!-- Namespace CPU time-series chart -->
-  <div class="chart-card">
-    <div class="chart-title">CPU Utilization by Namespace</div>
-    <div class="chart-inner" id="cpu-chart"></div>
-    <div class="chart-legend" id="cpu-legend"></div>
-  </div>
-  <!-- Namespace Memory time-series chart -->
-  <div class="chart-card">
-    <div class="chart-title">Memory Utilization by Namespace</div>
-    <div class="chart-inner" id="mem-chart"></div>
-    <div class="chart-legend" id="mem-legend"></div>
+  <!-- CPU + Memory charts: side-by-side -->
+  <div class="charts-row">
+    <div class="chart-card">
+      <div class="chart-title">CPU Utilization by Namespace</div>
+      <div class="chart-inner" id="cpu-chart"></div>
+      <div class="chart-legend" id="cpu-legend"></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Memory Utilization by Namespace</div>
+      <div class="chart-inner" id="mem-chart"></div>
+      <div class="chart-legend" id="mem-legend"></div>
+    </div>
   </div>
 </section>
+<!-- Shared hover tooltip for CPU/Memory charts -->
+<div id="chart-tt"></div>
 
 <!-- ── Pod Count Timeline ─────────────────────────────────────────── -->
 <section>
@@ -1965,7 +1987,7 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick,nsFilter){
   var nsSet={};
   snaps.forEach(function(s){Object.keys(s[field]||{}).forEach(function(ns){nsSet[ns]=1;});});
   var allNsList=Object.keys(nsSet).sort();
-  /* apply free-text namespace filter (case-insensitive substring) */
+  /* apply global namespace filter (case-insensitive substring) */
   var nsList=nsFilter
     ?allNsList.filter(function(ns){return ns.toLowerCase().indexOf(nsFilter.toLowerCase())>=0;})
     :allNsList;
@@ -1974,14 +1996,18 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick,nsFilter){
     if(lEl)lEl.innerHTML='';return;
   }
 
-  var W=700,H=200,PL=54,PR=12,PT=12,PB=32;  /* PB=32 reserves space for time axis */
+  var W=700,H=200,PL=54,PR=12,PT=12,PB=32;
   var cw=W-PL-PR,ch=H-PT-PB;
 
   var times=snaps.map(function(s){return new Date(s.ts).getTime();});
   var t0=times[0],t1=times[times.length-1];if(t1===t0)t1=t0+60000;
 
   var maxV=0;
-  snaps.forEach(function(s){Object.values(s[field]||{}).forEach(function(v){if(v>maxV)maxV=v;});});
+  snaps.forEach(function(s){
+    var fv=s[field]||{};
+    /* only consider filtered namespaces for scale */
+    nsList.forEach(function(ns){var v=fv[ns]||0;if(v>maxV)maxV=v;});
+  });
   if(!maxV)maxV=1;
 
   function px(t){return PL+(t-t0)/(t1-t0)*cw;}
@@ -2002,36 +2028,117 @@ function drawChart(cId,lId,snaps,field,fmtVal,fmtTick,nsFilter){
   for(var j=0;j<=xTicks;j++){
     var tx=PL+cw*j/xTicks;
     var tt=t0+(t1-t0)*j/xTicks;
-    var d=new Date(tt);
-    var hh=('0'+d.getUTCHours()).slice(-2)+':'+('0'+d.getUTCMinutes()).slice(-2);
+    var dd=new Date(tt);
+    var hh=('0'+dd.getUTCHours()).slice(-2)+':'+('0'+dd.getUTCMinutes()).slice(-2);
     xAxis+='<line x1="'+tx.toFixed(1)+'" y1="'+baseY+'" x2="'+tx.toFixed(1)+'" y2="'+(Number(baseY)+4).toFixed(1)+'" stroke="#484f58" stroke-width="1"/>';
     xAxis+='<text x="'+tx.toFixed(1)+'" y="'+(Number(baseY)+14).toFixed(1)+'" text-anchor="middle" font-size="9" fill="#8b949e">'+hh+'</text>';
   }
 
-  /* Data lines */
-  var lines='',stats=[];
+  /* Build series: visual paths + wide transparent hit areas */
+  var seriesData=[];
+  var visLines='',hitAreas='';
   nsList.forEach(function(ns,idx){
     var color=NS_PAL[idx%NS_PAL.length];
     var pts=snaps.map(function(s){return {t:new Date(s.ts).getTime(),v:(s[field][ns]||0)};});
     var vals=pts.map(function(p){return p.v;});
     var mn=Math.min.apply(null,vals),mx=Math.max.apply(null,vals);
     var mean=vals.reduce(function(a,b){return a+b;},0)/vals.length;
-    stats.push({ns:ns,color:color,min:mn,max:mx,mean:mean});
-    var d=pts.map(function(p,i){return (i===0?'M':'L')+px(p.t).toFixed(1)+' '+py(p.v).toFixed(1);}).join(' ');
-    lines+='<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.8" stroke-linejoin="round"/>';
+    /* pre-format stats so hover handlers don't need fmtVal closure */
+    seriesData.push({ns:ns,color:color,pts:pts,
+      minS:fmtVal(mn),maxS:fmtVal(mx),avgS:fmtVal(mean)});
+
+    var pathD=pts.map(function(p,i){
+      return (i===0?'M':'L')+px(p.t).toFixed(1)+' '+py(p.v).toFixed(1);
+    }).join(' ');
+
+    /* visual line — pointer-events:none so hits go to the transparent layer */
+    visLines+='<path id="'+cId+'-ln-'+idx+'" d="'+pathD+'"'+
+      ' fill="none" stroke="'+color+'" stroke-width="1.8" stroke-linejoin="round"'+
+      ' pointer-events="none"/>';
+
+    /* wide transparent hit area for easy hover detection */
+    visLines+='<path d="'+pathD+'"'+
+      ' fill="none" stroke="transparent" stroke-width="14" style="cursor:crosshair"'+
+      ' onmouseenter="nsHoverIn(event,\''+cId+'\','+idx+')"'+
+      ' onmousemove="nsHoverMove(event)"'+
+      ' onmouseleave="nsHoverOut(\''+cId+'\')"/>';
   });
+
+  /* store series data for hover handlers */
+  window['_nsSeries_'+cId]=seriesData;
 
   cEl.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="display:block">'+
     '<rect width="'+W+'" height="'+H+'" fill="#161b22" rx="4"/>'+
-    grid+yLbls+xAxis+lines+'</svg>';
+    grid+yLbls+xAxis+visLines+'</svg>';
 
+  /* compact legend: color dot + namespace name only; stats live in the hover tooltip */
   if(lEl){
-    lEl.innerHTML=stats.map(function(s){
-      return '<span><span style="color:'+s.color+';font-size:14px">&#9632;</span> '+
-        '<span style="color:var(--tx)">'+esc(s.ns)+'</span>'+
-        '<span class="mu">&nbsp;min:'+fmtVal(s.min)+'&nbsp;max:'+fmtVal(s.max)+'&nbsp;avg:'+fmtVal(s.mean)+'</span></span>';
+    lEl.innerHTML=seriesData.map(function(s){
+      return '<span title="'+esc(s.ns)+' &bull; min: '+s.minS+' &bull; max: '+s.maxS+' &bull; avg: '+s.avgS+'">'+
+        '<span style="color:'+s.color+';font-size:13px">&#9632;</span>'+
+        ' <span style="color:var(--tx)">'+esc(s.ns)+'</span></span>';
     }).join('');
   }
+}
+
+/* ── Chart line hover handlers ───────────────────────────────────────
+ *  nsHoverIn  — highlight hovered line, show tooltip with stats
+ *  nsHoverMove— follow the cursor
+ *  nsHoverOut — restore all lines, hide tooltip
+ * ─────────────────────────────────────────────────────────────────── */
+function nsHoverIn(evt,cId,idx){
+  var series=window['_nsSeries_'+cId];
+  if(!series)return;
+  var s=series[idx];
+
+  /* dim all other lines, make hovered line bolder */
+  series.forEach(function(_,i){
+    var el=document.getElementById(cId+'-ln-'+i);
+    if(!el)return;
+    if(i===idx){
+      el.setAttribute('stroke-opacity','1');
+      el.setAttribute('stroke-width','2.8');
+    } else {
+      el.setAttribute('stroke-opacity','0.1');
+      el.setAttribute('stroke-width','1');
+    }
+  });
+
+  /* build and show tooltip */
+  var tt=document.getElementById('chart-tt');
+  if(!tt)return;
+  tt.innerHTML=
+    '<div style="font-weight:700;color:'+s.color+';margin-bottom:5px;font-size:12px">'+esc(s.ns)+'</div>'+
+    '<div style="display:grid;grid-template-columns:auto auto;gap:2px 10px;font-size:11px">'+
+    '<span style="color:var(--mu)">actual (now)</span><span style="color:var(--tx);font-weight:600">'+s.avgS+'</span>'+
+    '<span style="color:var(--mu)">min</span><span style="color:var(--tx)">'+s.minS+'</span>'+
+    '<span style="color:var(--mu)">max</span><span style="color:var(--tx)">'+s.maxS+'</span>'+
+    '<span style="color:var(--mu)">avg</span><span style="color:var(--tx)">'+s.avgS+'</span>'+
+    '</div>';
+  tt.style.display='block';
+  _posChartTT(evt);
+}
+
+function nsHoverMove(evt){_posChartTT(evt);}
+
+function nsHoverOut(cId){
+  var series=window['_nsSeries_'+cId];
+  if(series){
+    series.forEach(function(_,i){
+      var el=document.getElementById(cId+'-ln-'+i);
+      if(el){el.setAttribute('stroke-opacity','1');el.setAttribute('stroke-width','1.8');}
+    });
+  }
+  var tt=document.getElementById('chart-tt');
+  if(tt)tt.style.display='none';
+}
+
+function _posChartTT(evt){
+  var tt=document.getElementById('chart-tt');
+  if(!tt)return;
+  var x=evt.clientX+16,y=evt.clientY-10;
+  if(x+210>window.innerWidth)x=evt.clientX-220;
+  tt.style.left=x+'px';tt.style.top=y+'px';
 }
 
 /* render: entire resource utilization section */
@@ -2521,19 +2628,54 @@ function renderCost(data){
       '</tr>';
   });
 
-  /* totals row */
-  rows.push('<tr style="border-top:2px solid var(--bd)">'+
+  /* ── Totals section: PAYG + 1-year + 3-year commitment rows ── */
+  var disc1y = c.commit_1y_discount||0.33;
+  var disc3y = c.commit_3y_discount||0.46;
+  var cost1y = c.total_cost_1y_month || (c.total_cost_month*(1-disc1y));
+  var cost3y = c.total_cost_3y_month || (c.total_cost_month*(1-disc3y));
+  var savePct1y = Math.round(disc1y*100);
+  var savePct3y = Math.round(disc3y*100);
+  var save1y = (c.total_cost_month - cost1y).toFixed(2);
+  var save3y = (c.total_cost_month - cost3y).toFixed(2);
+
+  /* PAYG total */
+  rows.push(
+    '<tr style="border-top:2px solid var(--bd)">'+
     '<td style="font-weight:700;color:var(--tx)">TOTAL</td>'+
     '<td></td><td></td><td></td><td></td><td></td><td></td>'+
     '<td class="mono mu">'+c.total_nodes+' nodes</td>'+
-    '<td></td>'+
-    '<td class="mono" style="font-weight:700;color:var(--tx)">$'+c.total_cost_month.toFixed(2)+'</td>'+
+    '<td style="color:var(--mu);font-size:10px">Pay-as-you-go</td>'+
+    '<td class="mono" style="font-weight:700;color:var(--tx)">$'+c.total_cost_month.toFixed(2)+'/mo</td>'+
+    '</tr>');
+
+  /* 1-year Universal Credit row */
+  rows.push(
+    '<tr style="background:rgba(63,185,80,.05)">'+
+    '<td colspan="8" style="font-size:11px;color:var(--mu);padding-left:16px">'+
+      '&#128181; <b style="color:var(--grn)">1-Year Universal Credit</b>'+
+      ' &nbsp;&#8212;&nbsp; '+savePct1y+'% discount'+
+      ' &nbsp;<span style="color:var(--mu)">(save $'+save1y+'/mo)</span>'+
+    '</td>'+
+    '<td style="color:var(--mu);font-size:10px">1-yr commit</td>'+
+    '<td class="mono" style="font-weight:700;color:var(--grn)">$'+cost1y.toFixed(2)+'/mo</td>'+
+    '</tr>');
+
+  /* 3-year Universal Credit row */
+  rows.push(
+    '<tr style="background:rgba(63,185,80,.09)">'+
+    '<td colspan="8" style="font-size:11px;color:var(--mu);padding-left:16px">'+
+      '&#128181; <b style="color:var(--grn)">3-Year Universal Credit</b>'+
+      ' &nbsp;&#8212;&nbsp; '+savePct3y+'% discount'+
+      ' &nbsp;<span style="color:var(--mu)">(save $'+save3y+'/mo)</span>'+
+    '</td>'+
+    '<td style="color:var(--mu);font-size:10px">3-yr commit</td>'+
+    '<td class="mono" style="font-weight:700;color:#3ecf8e">$'+cost3y.toFixed(2)+'/mo</td>'+
     '</tr>');
 
   el.innerHTML='<table><thead><tr>'+
     '<th>Namespace</th><th>Pods</th><th>CPU Req</th><th>RAM Req</th>'+
     '<th>CPU %</th><th>RAM %</th><th>Driver</th>'+
-    '<th>Node Equiv</th><th style="min-width:80px">Cost</th><th>$/month</th>'+
+    '<th>Node Equiv</th><th>Pricing tier</th><th>$/month</th>'+
     '</tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 
   /* methodology note */
@@ -2544,11 +2686,14 @@ function renderCost(data){
       ' &middot; Pay-as-you-go: $'+c.price_ocpu_hr+'/OCPU-hr + $'+c.price_ram_gb_hr+'/GB-hr&nbsp;'+
       ' &middot; Node cost: <b>$'+c.node_cost_month+'/month</b>&nbsp;'+
       ' &middot; '+c.total_nodes+' nodes &times; $'+c.node_cost_month+' = <b>$'+c.total_cost_month+'/month</b>&nbsp;'+
+      ' &middot; 1-yr UC: '+savePct1y+'% off → <b>$'+cost1y.toFixed(2)+'/month</b>&nbsp;'+
+      ' &middot; 3-yr UC: '+savePct3y+'% off → <b>$'+cost3y.toFixed(2)+'/month</b>&nbsp;'+
       ' &middot; Cost share = max(CPU req%, RAM req%) of cluster allocatable.'+
       ' &middot; <b>Driver badge</b> uses utilization efficiency (actual÷requested) when live metrics are available,'+
       ' so over-provisioned CPU requests do not mask RAM pressure.'+
       ' Hover the badge for per-namespace efficiency detail.'+
-      ' Override pricing via env vars <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>.';
+      ' Override via env vars: <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>'+
+      ' / <code>OCI_COMMIT_1Y_DISCOUNT</code> / <code>OCI_COMMIT_3Y_DISCOUNT</code>.';
   }
 }
 
