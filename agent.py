@@ -1330,8 +1330,47 @@ def _pod_restart_snapshot() -> Dict:
                 "metrics_live": metrics_available,
             }
 
+        # ── Deployment events: recent ReplicaSet creations (last 48h) ──
+        # Used by the Deployment Impact Timeline overlay in the ATF dashboard.
+        deploy_events: List[Dict] = []
+        try:
+            apps_api  = client.AppsV1Api()
+            rs_cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+            rs_items  = apps_api.list_replica_set_for_all_namespaces(limit=200).items
+            seen_deploys: Set[str] = set()
+            for rs in rs_items:
+                ts_obj = rs.metadata.creation_timestamp
+                if not ts_obj:
+                    continue
+                ts_iso = ts_obj.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(ts_obj, "strftime") else str(ts_obj)[:19]+"Z"
+                if ts_iso < rs_cutoff:
+                    continue
+                ns   = rs.metadata.namespace or ""
+                refs = rs.metadata.owner_references or []
+                dep_name = next((r.name for r in refs if r.kind == "Deployment"), None)
+                if not dep_name:
+                    continue
+                key = f"{ns}/{dep_name}/{ts_iso[:16]}"   # dedupe same deploy within same minute
+                if key in seen_deploys:
+                    continue
+                seen_deploys.add(key)
+                # grab the image tag from the first container
+                ctrs = (rs.spec.template.spec.containers or []) if rs.spec and rs.spec.template and rs.spec.template.spec else []
+                img  = ctrs[0].image if ctrs else ""
+                tag  = img.split(":")[-1] if ":" in img else img.split("/")[-1][:20]
+                deploy_events.append({
+                    "ts":      ts_iso,
+                    "ns":      ns,
+                    "deploy":  dep_name,
+                    "tag":     tag,
+                })
+            deploy_events.sort(key=lambda x: x["ts"])
+        except Exception as _de:
+            logging.debug("deploy_events fetch error: %s", _de)
+
         result = {
             "pods": pods,
+            "deploy_events": deploy_events,
             "cost": {
                 "oci_instance":           OCI_INSTANCE,
                 "ocpu_per_node":          OCPU_PER_NODE,
@@ -1484,6 +1523,54 @@ tr:hover td{background:var(--bg3);}
 #gf-active-bar{background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.28);border-radius:5px;
                padding:5px 14px;font-size:11px;color:var(--blu);display:none;
                align-items:center;gap:10px;margin:0 0 4px;}
+/* ── Above-the-fold command center ──────────────────────────────────────── */
+#atf{display:grid;grid-template-rows:auto auto auto;gap:0;background:var(--bg);padding:0 20px 0;}
+/* Row 1 — Golden Signals strip */
+.gs-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:10px 0 8px;}
+.gs-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:10px 12px;min-height:110px;position:relative;overflow:hidden;}
+.gs-title{font-size:9px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;}
+.gs-main{font-size:22px;font-weight:700;line-height:1.1;margin-bottom:4px;}
+.gs-rows{display:flex;flex-direction:column;gap:3px;}
+.gs-row{display:flex;align-items:center;justify-content:space-between;font-size:11px;}
+.gs-ns{color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px;}
+.gs-val{font-weight:600;font-family:monospace;font-size:11px;}
+.rag-green{color:var(--grn);}
+.rag-amber{color:var(--yel);}
+.rag-red{color:var(--red);}
+.rag-dot-green{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--grn);flex-shrink:0;}
+.rag-dot-amber{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--yel);flex-shrink:0;}
+.rag-dot-red{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0;}
+/* Row 2 — Operational Pulse */
+.op-strip{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:0 0 8px;}
+.op-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:10px 14px;display:flex;flex-direction:column;gap:4px;}
+.op-title{font-size:9px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;}
+.op-main{font-size:11px;display:flex;flex-direction:column;gap:3px;}
+.op-row{display:flex;align-items:center;gap:8px;font-size:12px;}
+/* Row 3 — Heatmap + Deployment Timeline */
+.hm-row{display:grid;grid-template-columns:3fr 2fr;gap:8px;padding:0 0 10px;}
+.hm-card{background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:10px 12px;overflow:hidden;}
+.hm-title{font-size:9px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;display:flex;align-items:center;gap:8px;}
+.hm-toggle{cursor:pointer;padding:1px 7px;border-radius:3px;font-size:9px;border:1px solid var(--bd);background:var(--bg3);color:var(--mu);}
+.hm-toggle.on{background:rgba(88,166,255,.15);border-color:var(--blu);color:var(--blu);}
+.hm-grid{display:grid;gap:3px;}
+.hm-ns-row{display:grid;align-items:center;gap:3px;}
+.hm-ns-label{font-size:10px;color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.hm-cell{height:16px;border-radius:2px;cursor:pointer;transition:opacity .1s;}
+.hm-cell:hover{opacity:.7;}
+.hm-legend{display:flex;align-items:center;gap:10px;font-size:9px;color:var(--mu);margin-top:5px;}
+.hm-legend-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;}
+/* Deployment timeline */
+#deploy-chart{width:100%;}
+.deploy-marker-label{font-size:9px;fill:var(--mu);}
+/* ATF issues strip */
+#atf-issues{padding:0 0 4px;}
+.atf-issue-row{display:flex;align-items:flex-start;gap:8px;padding:4px 0;border-bottom:1px solid #1c2128;font-size:11px;}
+.atf-issue-row:last-child{border-bottom:none;}
+.atf-issue-ns{color:var(--mu);font-size:10px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.atf-issue-msg{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.atf-issue-rec{color:var(--mu);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;}
+/* toil sparkline */
+#toil-spark{display:inline-block;vertical-align:middle;}
 </style>
 </head>
 <body>
@@ -1493,8 +1580,123 @@ tr:hover td{background:var(--bg3);}
   <h1>&#128269; SRE Agent</h1>
   <span class="sdot" id="sdot"></span>
   <span id="cluster-name">&#8203;</span>
+  <!-- ATF summary badges (populated by renderATF) -->
+  <span id="hdr-crit" style="display:none;background:rgba(248,81,73,.15);border:1px solid var(--red);
+    border-radius:4px;padding:2px 8px;font-size:11px;color:var(--red);font-weight:600"></span>
+  <span id="hdr-warn" style="display:none;background:rgba(227,179,65,.1);border:1px solid var(--yel);
+    border-radius:4px;padding:2px 8px;font-size:11px;color:var(--yel);font-weight:600"></span>
   <span id="last-check">&#8203;</span>
 </header>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- ABOVE-THE-FOLD COMMAND CENTRE                                       -->
+<!-- Everything visible without scrolling on a 1440×900 viewport         -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<div id="atf">
+
+  <!-- ── ROW 1: Golden Signals ──────────────────────────────────────── -->
+  <div class="gs-strip">
+
+    <!-- Card 1: Saturation (CPU + RAM per namespace) -->
+    <div class="gs-card" id="gs-sat">
+      <div class="gs-title">&#9889; Saturation</div>
+      <div class="gs-rows" id="gs-sat-rows"><span class="mu" style="font-size:10px">Loading&hellip;</span></div>
+    </div>
+
+    <!-- Card 2: Error Rate (CrashLoop + OOMKilled per namespace) -->
+    <div class="gs-card" id="gs-err">
+      <div class="gs-title">&#128308; Error Rate</div>
+      <div class="gs-rows" id="gs-err-rows"><span class="mu" style="font-size:10px">Loading&hellip;</span></div>
+    </div>
+
+    <!-- Card 3: Restart Trend (24h / 7d / 30d totals) -->
+    <div class="gs-card" id="gs-rst">
+      <div class="gs-title">&#128257; Restart Trend</div>
+      <div class="gs-rows" id="gs-rst-rows"><span class="mu" style="font-size:10px">Loading&hellip;</span></div>
+    </div>
+
+    <!-- Card 4: Cost Efficiency (RAG per namespace) -->
+    <div class="gs-card" id="gs-eff">
+      <div class="gs-title">&#128181; Cost Efficiency</div>
+      <div class="gs-rows" id="gs-eff-rows"><span class="mu" style="font-size:10px">Loading&hellip;</span></div>
+    </div>
+
+  </div><!-- /.gs-strip -->
+
+  <!-- ── ROW 2: Operational Pulse ───────────────────────────────────── -->
+  <div class="op-strip">
+
+    <!-- Card 1: Active Incidents -->
+    <div class="op-card">
+      <div class="op-title">&#9888; Active Incidents</div>
+      <div class="op-main" id="op-incidents">
+        <span class="mu" style="font-size:10px">Loading&hellip;</span>
+      </div>
+    </div>
+
+    <!-- Card 2: Weekly Toil -->
+    <div class="op-card">
+      <div class="op-title">&#9881; Weekly Toil</div>
+      <div class="op-main" id="op-toil">
+        <span class="mu" style="font-size:10px">Loading&hellip;</span>
+      </div>
+    </div>
+
+    <!-- Card 3: Last Deployment -->
+    <div class="op-card">
+      <div class="op-title">&#128640; Last Deployment</div>
+      <div class="op-main" id="op-deploy">
+        <span class="mu" style="font-size:10px">Loading&hellip;</span>
+      </div>
+    </div>
+
+  </div><!-- /.op-strip -->
+
+  <!-- ── ROW 3: Heatmap + Deployment Timeline ────────────────────────── -->
+  <div class="hm-row">
+
+    <!-- Saturation Heatmap -->
+    <div class="hm-card">
+      <div class="hm-title">
+        &#128293; Namespace Saturation (24 h)
+        <span class="hm-toggle on" id="hm-cpu" onclick="setHmField('cpu')">CPU</span>
+        <span class="hm-toggle"   id="hm-mem" onclick="setHmField('mem')">MEM</span>
+      </div>
+      <div id="heatmap-container"></div>
+      <div class="hm-legend">
+        <span class="hm-legend-swatch" style="background:var(--grn)"></span>&lt;50%
+        <span class="hm-legend-swatch" style="background:var(--yel)"></span>50–80%
+        <span class="hm-legend-swatch" style="background:var(--red)"></span>&gt;80%
+        <span class="mu" style="margin-left:6px;font-size:9px" id="hm-snap-info"></span>
+      </div>
+    </div>
+
+    <!-- Deployment Impact Timeline -->
+    <div class="hm-card">
+      <div class="hm-title">
+        &#128640; Deployment Impact
+        <span class="hm-toggle on" id="dt-restarts" onclick="setDtField('restarts')">Restarts</span>
+        <span class="hm-toggle"   id="dt-cpu"      onclick="setDtField('cpu')">CPU</span>
+      </div>
+      <div id="deploy-timeline-container"></div>
+    </div>
+
+  </div><!-- /.hm-row -->
+
+  <!-- ── ROW 4: Top Issues (above-fold preview) ──────────────────────── -->
+  <div style="background:var(--bg2);border:1px solid var(--bd);border-radius:7px;padding:8px 12px;margin-bottom:10px;">
+    <div style="font-size:9px;font-weight:700;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">
+      &#9888; Top Issues &nbsp;<span id="atf-issue-count" class="mu" style="font-weight:400"></span>
+      <span style="float:right;font-size:9px;color:var(--blu);cursor:pointer" onclick="document.getElementById('full-issues-section').scrollIntoView({behavior:'smooth'})">View all &#8595;</span>
+    </div>
+    <div id="atf-issues"></div>
+  </div>
+
+</div><!-- /#atf -->
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<!-- DETAIL SECTIONS (below the fold — scroll to access)               -->
+<!-- ══════════════════════════════════════════════════════════════════ -->
 <div class="cards" id="cards"></div>
 <div class="ctrl">
   <label>Window&nbsp;</label>
@@ -1608,7 +1810,7 @@ tr:hover td{background:var(--bg3);}
 </section>
 
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
-<section>
+<section id="full-issues-section">
   <h2>&#9888; Issues <span class="cnt" id="i-cnt"></span></h2>
   <div id="iss"></div>
 </section>
@@ -2165,16 +2367,22 @@ function renderMetrics(data){
   _addNsToSet(Object.keys(nsSet));
   drawChart('cpu-chart','cpu-legend',data.snaps||[],'cpu',fmtCpuM,fmtCpuTick,st.gf);
   drawChart('mem-chart','mem-legend',data.snaps||[],'mem',fmtMemGi,fmtMemTick,st.gf);
+  /* update ATF heatmap and deployment timeline with fresh metrics */
+  renderHeatmap(data);
+  renderDeployTimeline(window._rstData,data);
+  renderGSSaturation(data,window._rstData);
 }
 
 /* ── main fetch ───────────────────────────────────────────────────── */
 function fetchAll(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(d){
     st.d=d;
+    window._statusData=d;  /* cache for ATF */
     renderCards(d);renderIss();renderOdoo();renderKevt(d.issues);renderNodes(d.nodes_overview);
     document.getElementById('eb').style.display='none';
     /* harvest namespaces from issue resource fields */
     _addNsToSet((d.issues||[]).map(issNs).filter(Boolean));
+    renderATF();  /* update ATF panels that depend on status data */
   }).catch(function(e){
     var eb=document.getElementById('eb');eb.textContent='Failed to fetch /api/status: '+e;eb.style.display='block';
   });
@@ -2411,7 +2619,17 @@ function renderPodTimeline(data){
 function fetchRestarts(){
   fetch('/api/pod-restarts')
     .then(function(r){return r.json();})
-    .then(function(d){window._rstData=d;renderRestarts(d);renderCost(d);})
+    .then(function(d){
+      window._rstData=d;
+      renderRestarts(d);
+      renderCost(d);
+      /* update all ATF panels that depend on restart/cost/deploy data */
+      renderGSRestarts(d);
+      renderGSEfficiency(d);
+      renderOpToil(window._statusData||st.d,d);
+      renderOpDeploy(d);
+      renderDeployTimeline(d,window._metricsData);
+    })
     .catch(function(){});
 }
 
@@ -2480,6 +2698,480 @@ function _addNsToSet(nsList){
   nsList.forEach(function(ns){window._allNs.add(ns);});
   updateNsDatalist();
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+ *  ABOVE-THE-FOLD COMMAND CENTRE — rendering functions
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── State for ATF toggles ───────────────────────────────────────────── */
+var _hmField='cpu';   /* heatmap field: 'cpu' | 'mem' */
+var _dtField='restarts'; /* deployment timeline field: 'restarts' | 'cpu' */
+
+function setHmField(f){
+  _hmField=f;
+  ['cpu','mem'].forEach(function(k){
+    var b=document.getElementById('hm-'+k);
+    if(b)b.className='hm-toggle'+(k===f?' on':'');
+  });
+  if(window._metricsData)renderHeatmap(window._metricsData);
+}
+
+function setDtField(f){
+  _dtField=f;
+  ['restarts','cpu'].forEach(function(k){
+    var b=document.getElementById('dt-'+k);
+    if(b)b.className='hm-toggle'+(k===f?' on':'');
+  });
+  renderDeployTimeline(window._rstData,window._metricsData);
+}
+
+/* ── Golden Signals — Row 1 ──────────────────────────────────────────── */
+function renderGoldenSignals(metricsData,rstData,statusData){
+  renderGSSaturation(metricsData,rstData);
+  renderGSErrors(statusData);
+  renderGSRestarts(rstData);
+  renderGSEfficiency(rstData);
+}
+
+/* Card 1: Saturation — top namespaces by CPU or RAM % */
+function renderGSSaturation(metricsData,rstData){
+  var el=document.getElementById('gs-sat-rows');
+  if(!el)return;
+  /* pull latest cpu/mem efficiency from rstData.cost.by_ns */
+  var byNs=(rstData&&rstData.cost&&rstData.cost.by_ns)||{};
+  var snaps=(metricsData&&metricsData.snaps)||[];
+  /* compute latest saturation per ns from last snapshot */
+  var latest={};
+  if(snaps.length){
+    var s=snaps[snaps.length-1];
+    Object.keys(s.cpu||{}).forEach(function(ns){
+      var req=(byNs[ns]&&byNs[ns].cpu_req_m)||1;
+      var act=s.cpu[ns]||0;
+      latest[ns]={cpu:Math.min(Math.round(act/req*100),999)};
+    });
+    Object.keys(s.mem||{}).forEach(function(ns){
+      var req=(byNs[ns]&&byNs[ns].mem_req_mi)||1;
+      var act=s.mem[ns]||0;
+      if(latest[ns])latest[ns].mem=Math.min(Math.round(act/req*100),999);
+      else latest[ns]={mem:Math.min(Math.round(act/req*100),999)};
+    });
+  }
+  var nsList=Object.keys(latest).sort(function(a,b){
+    var va=Math.max(latest[a].cpu||0,latest[a].mem||0);
+    var vb=Math.max(latest[b].cpu||0,latest[b].mem||0);
+    return vb-va;
+  }).slice(0,5);
+  if(!nsList.length){
+    el.innerHTML='<span class="mu" style="font-size:10px">No metrics yet</span>';return;
+  }
+  el.innerHTML=nsList.map(function(ns){
+    var d=latest[ns];
+    var cpuPct=d.cpu||0,memPct=d.mem||0;
+    var maxPct=Math.max(cpuPct,memPct);
+    var cls=maxPct>=80?'rag-red':maxPct>=50?'rag-amber':'rag-green';
+    var dotCls=maxPct>=80?'rag-dot-red':maxPct>=50?'rag-dot-amber':'rag-dot-green';
+    return '<div class="gs-row">'+
+      '<span class="'+dotCls+'"></span>'+
+      '<span class="gs-ns">'+esc(ns)+'</span>'+
+      '<span class="gs-val '+cls+'">C:'+cpuPct+'% M:'+memPct+'%</span>'+
+      '</div>';
+  }).join('');
+}
+
+/* Card 2: Error Rate — namespaces with CrashLoop/OOMKilled issues */
+function renderGSErrors(statusData){
+  var el=document.getElementById('gs-err-rows');
+  if(!el)return;
+  var issues=(statusData&&statusData.issues)||[];
+  var errTypes=['CrashLoopBackOff','OOMKilled','Error','ErrImagePull','ImagePullBackOff'];
+  var nsCounts={};
+  issues.forEach(function(i){
+    var isErr=errTypes.some(function(t){return (i.check||'').indexOf(t)>=0||(i.message||'').indexOf(t)>=0;});
+    if(!isErr)return;
+    var ns=issNs(i)||'(cluster)';
+    nsCounts[ns]=(nsCounts[ns]||0)+1;
+  });
+  var nsList=Object.keys(nsCounts).sort(function(a,b){return nsCounts[b]-nsCounts[a];}).slice(0,5);
+  if(!nsList.length){
+    el.innerHTML='<div class="gs-row"><span class="rag-dot-green"></span><span style="color:var(--grn);font-size:11px">No errors detected</span></div>';
+    return;
+  }
+  el.innerHTML=nsList.map(function(ns){
+    var cnt=nsCounts[ns];
+    var cls=cnt>=3?'rag-red':'rag-amber';
+    var dotCls=cnt>=3?'rag-dot-red':'rag-dot-amber';
+    return '<div class="gs-row">'+
+      '<span class="'+dotCls+'"></span>'+
+      '<span class="gs-ns">'+esc(ns)+'</span>'+
+      '<span class="gs-val '+cls+'">'+cnt+' issue'+(cnt>1?'s':'')+'</span>'+
+      '</div>';
+  }).join('');
+}
+
+/* Card 3: Restart Trend — 24h/7d/30d totals from restart data */
+function renderGSRestarts(rstData){
+  var el=document.getElementById('gs-rst-rows');
+  if(!el||!rstData)return;
+  var pods=rstData.pods||[];
+  var now=Date.now();
+  var h24=now-86400000,h168=now-7*86400000,h720=now-30*86400000;
+  var t24=0,t7d=0,t30d=0,tAll=0;
+  pods.forEach(function(p){
+    var r=p.restarts||0;
+    tAll+=r;
+    /* we don't have per-pod timestamp breakdown, use total as 30d proxy */
+    t30d+=r;
+  });
+  /* top restarting namespaces */
+  var nsRst={};
+  pods.forEach(function(p){nsRst[p.ns]=(nsRst[p.ns]||0)+(p.restarts||0);});
+  var top=Object.keys(nsRst).sort(function(a,b){return nsRst[b]-nsRst[a];}).slice(0,3);
+  var rows=top.map(function(ns){
+    var cls=nsRst[ns]>=10?'rag-red':nsRst[ns]>=3?'rag-amber':'rag-green';
+    var dotCls=nsRst[ns]>=10?'rag-dot-red':nsRst[ns]>=3?'rag-dot-amber':'rag-dot-green';
+    return '<div class="gs-row">'+
+      '<span class="'+dotCls+'"></span>'+
+      '<span class="gs-ns">'+esc(ns)+'</span>'+
+      '<span class="gs-val '+cls+'">'+nsRst[ns]+'</span>'+
+      '</div>';
+  });
+  rows.unshift('<div class="gs-row" style="border-bottom:1px solid var(--bd);padding-bottom:3px;margin-bottom:2px">'+
+    '<span style="color:var(--mu);font-size:10px">Total (30d)</span>'+
+    '<span class="gs-val" style="color:var(--tx)">'+tAll+'</span></div>');
+  el.innerHTML=rows.join('');
+}
+
+/* Card 4: Cost Efficiency — RAG score per namespace */
+function renderGSEfficiency(rstData){
+  var el=document.getElementById('gs-eff-rows');
+  if(!el||!rstData)return;
+  var byNs=(rstData.cost&&rstData.cost.by_ns)||{};
+  var live=Object.values(byNs).some(function(n){return n.metrics_live;});
+  if(!live){
+    el.innerHTML='<span class="mu" style="font-size:10px">Metrics-server needed for efficiency scores</span>';
+    return;
+  }
+  var scored=Object.keys(byNs).map(function(ns){
+    var n=byNs[ns];
+    var cpuEff=n.cpu_req_m>0?(n.cpu_util_m||0)/n.cpu_req_m:0;
+    var memEff=n.mem_req_mi>0?(n.mem_util_mi||0)/n.mem_req_mi:0;
+    var score=Math.round((cpuEff+memEff)/2*100);
+    return {ns:ns,score:score};
+  }).sort(function(a,b){return a.score-b.score;}).slice(0,5);
+  el.innerHTML=scored.map(function(s){
+    var cls=s.score>=60?'rag-green':s.score>=30?'rag-amber':'rag-red';
+    var dotCls=s.score>=60?'rag-dot-green':s.score>=30?'rag-dot-amber':'rag-dot-red';
+    return '<div class="gs-row">'+
+      '<span class="'+dotCls+'"></span>'+
+      '<span class="gs-ns">'+esc(s.ns)+'</span>'+
+      '<span class="gs-val '+cls+'">'+s.score+'%</span>'+
+      '</div>';
+  }).join('');
+}
+
+/* ── Operational Pulse — Row 2 ───────────────────────────────────────── */
+function renderOperationalPulse(statusData,rstData){
+  renderOpIncidents(statusData);
+  renderOpToil(statusData,rstData);
+  renderOpDeploy(rstData);
+}
+
+function renderOpIncidents(statusData){
+  var el=document.getElementById('op-incidents');
+  if(!el)return;
+  var issues=(statusData&&statusData.issues)||[];
+  var crit=issues.filter(function(i){return i.severity==='CRITICAL';}).length;
+  var warn=issues.filter(function(i){return i.severity==='WARNING';}).length;
+  var info=issues.filter(function(i){return i.severity==='INFO';}).length;
+  var hc=document.getElementById('hdr-crit');
+  var hw=document.getElementById('hdr-warn');
+  if(hc){hc.style.display=crit?'':'none';hc.textContent='🔴 '+crit+' critical';}
+  if(hw){hw.style.display=warn?'':'none';hw.textContent='🟡 '+warn+' warnings';}
+  el.innerHTML=
+    '<div class="op-row"><span style="color:var(--red);font-weight:700;font-size:18px">'+crit+'</span>'+
+    '<span class="mu" style="font-size:11px">critical</span></div>'+
+    '<div class="op-row"><span style="color:var(--yel);font-weight:700;font-size:16px">'+warn+'</span>'+
+    '<span class="mu" style="font-size:11px">warnings</span></div>'+
+    '<div class="op-row"><span style="color:var(--blu);font-weight:700;font-size:13px">'+info+'</span>'+
+    '<span class="mu" style="font-size:11px">info</span></div>';
+}
+
+function renderOpToil(statusData,rstData){
+  var el=document.getElementById('op-toil');
+  if(!el)return;
+  /* Toil = sum of CrashLoopBackOff + OOMKilled + Failed pod events in issues */
+  var issues=(statusData&&statusData.issues)||[];
+  var toilTypes=['CrashLoopBackOff','OOMKilled','Failed','Evict','Job'];
+  var toil=issues.filter(function(i){
+    return toilTypes.some(function(t){
+      return (i.check||'').indexOf(t)>=0||(i.message||'').indexOf(t)>=0;
+    });
+  }).length;
+  /* Add restart counts as additional toil signal */
+  var pods=(rstData&&rstData.pods)||[];
+  var highRestarts=pods.filter(function(p){return (p.restarts||0)>=5;}).length;
+  var total=toil+highRestarts;
+  var cls=total>=10?'rag-red':total>=5?'rag-amber':'rag-green';
+  el.innerHTML=
+    '<div class="op-row"><span class="'+cls+'" style="font-weight:700;font-size:18px">'+total+'</span>'+
+    '<span class="mu" style="font-size:11px">ops this cycle</span></div>'+
+    '<div class="op-row" style="color:var(--mu);font-size:10px">'+
+    toil+' active events · '+highRestarts+' high-restart pods</div>'+
+    '<div class="op-row" style="color:var(--mu);font-size:10px">&#9432; Toil = crash+OOM+fail events</div>';
+}
+
+function renderOpDeploy(rstData){
+  var el=document.getElementById('op-deploy');
+  if(!el)return;
+  var evts=(rstData&&rstData.deploy_events)||[];
+  if(!evts.length){
+    el.innerHTML='<div class="op-row mu" style="font-size:11px">No deployments in last 48h</div>';
+    return;
+  }
+  var last=evts[evts.length-1];
+  var ago=_relTime(last.ts);
+  el.innerHTML=
+    '<div class="op-row" style="font-size:12px;font-weight:600">'+esc(last.deploy)+'</div>'+
+    '<div class="op-row" style="color:var(--mu);font-size:10px">'+esc(last.ns)+' &nbsp;&#8250;&nbsp; '+esc(last.tag)+'</div>'+
+    '<div class="op-row" style="color:var(--mu);font-size:10px">'+ago+'</div>'+
+    '<div class="op-row" style="color:var(--mu);font-size:10px">'+evts.length+' deploy'+(evts.length>1?'s':'')+'  in last 48h</div>';
+}
+
+function _relTime(isoStr){
+  if(!isoStr)return '';
+  var d=new Date(isoStr),now=new Date();
+  var diff=Math.floor((now-d)/1000);
+  if(diff<60)return diff+'s ago';
+  if(diff<3600)return Math.floor(diff/60)+'m ago';
+  if(diff<86400)return Math.floor(diff/3600)+'h ago';
+  return Math.floor(diff/86400)+'d ago';
+}
+
+/* ── Saturation Heatmap — Row 3 left ─────────────────────────────────── */
+function renderHeatmap(metricsData){
+  if(metricsData)window._metricsData=metricsData;
+  else metricsData=window._metricsData;
+  var el=document.getElementById('heatmap-container');
+  var info=document.getElementById('hm-snap-info');
+  if(!el)return;
+  var snaps=(metricsData&&metricsData.snaps)||[];
+  var rstData=window._rstData;
+  var byNs=(rstData&&rstData.cost&&rstData.cost.by_ns)||{};
+
+  if(!snaps.length){
+    el.innerHTML='<p class="empty">No metrics snapshots yet</p>';return;
+  }
+
+  /* collect all namespaces */
+  var nsSet={};
+  snaps.forEach(function(s){
+    Object.keys(s[_hmField]||{}).forEach(function(ns){nsSet[ns]=1;});
+  });
+  var allNs=Object.keys(nsSet).filter(function(ns){return !['kube-system','kube-public','kube-node-lease'].includes(ns);}).sort();
+  if(!allNs.length){el.innerHTML='<p class="empty">No namespace data</p>';return;}
+
+  /* bucket snaps into hourly buckets for last 24h */
+  var now=Date.now();
+  var HOURS=24,BUCKET_MS=3600000;
+  var buckets=[];  /* buckets[nsIdx][hourIdx] = avg saturation 0-1 */
+  allNs.forEach(function(){buckets.push(new Array(HOURS).fill(null));});
+
+  /* accumulate */
+  var sums=allNs.map(function(){return new Array(HOURS).fill(0);});
+  var cnts=allNs.map(function(){return new Array(HOURS).fill(0);});
+  snaps.forEach(function(s){
+    var ts=new Date(s.ts).getTime();
+    var age=now-ts;
+    if(age>HOURS*BUCKET_MS)return;
+    var hIdx=Math.min(HOURS-1,Math.floor(age/BUCKET_MS));
+    /* hIdx 0 = most recent hour; display reversed so time goes left→right */
+    allNs.forEach(function(ns,ni){
+      var act=(s[_hmField]||{})[ns]||0;
+      var req=_hmField==='cpu'
+        ?((byNs[ns]&&byNs[ns].cpu_req_m)||1)
+        :((byNs[ns]&&byNs[ns].mem_req_mi)||1);
+      sums[ni][hIdx]+=act/req;
+      cnts[ni][hIdx]++;
+    });
+  });
+  allNs.forEach(function(ns,ni){
+    for(var h=0;h<HOURS;h++){
+      buckets[ni][h]=cnts[ni][h]>0?sums[ni][h]/cnts[ni][h]:null;
+    }
+  });
+
+  var CELL_W=Math.max(10,Math.floor((el.offsetWidth||500-100)/(HOURS+1)));
+  var CELL_H=16,GAP=3,LABEL_W=90;
+  var totalH=allNs.length*(CELL_H+GAP)+20;
+
+  /* hour labels (right = most recent) */
+  var nowH=new Date().getUTCHours();
+  var hourLabels='';
+  for(var h=0;h<HOURS;h+=4){
+    var labelH=((nowH-(HOURS-1-h)%24)+24)%24;
+    hourLabels+='<text x="'+(LABEL_W+(h+0.5)*CELL_W)+'" y="12" text-anchor="middle" font-size="8" fill="#8b949e">'+
+      ('0'+labelH).slice(-2)+'h</text>';
+  }
+
+  var cells='';
+  allNs.forEach(function(ns,ni){
+    var y=20+ni*(CELL_H+GAP);
+    /* namespace label */
+    cells+='<text x="'+(LABEL_W-4)+'" y="'+(y+CELL_H-4)+'" text-anchor="end" font-size="9" fill="#8b949e">'+
+      esc(ns.length>12?ns.substring(0,11)+'…':ns)+'</text>';
+    /* cells left→right = oldest→newest; hIdx 0 is most recent so invert */
+    for(var h=0;h<HOURS;h++){
+      var hIdx=HOURS-1-h;  /* h=0 → oldest; h=23 → newest */
+      var val=buckets[ni][hIdx];
+      var fill=val===null?'#21262d':val>=0.8?'#f85149':val>=0.5?'#e3b341':'#3fb950';
+      var opacity=val===null?'0.3':'1';
+      var title=val===null?ns+' · no data':ns+' · '+(Math.round(val*100))+'% '+_hmField;
+      cells+='<rect x="'+(LABEL_W+h*CELL_W)+'" y="'+y+'" width="'+(CELL_W-1)+
+        '" height="'+CELL_H+'" fill="'+fill+'" opacity="'+opacity+
+        '" rx="2"><title>'+esc(title)+'</title></rect>';
+    }
+  });
+
+  var svgW=LABEL_W+HOURS*CELL_W;
+  el.innerHTML='<svg width="100%" viewBox="0 0 '+svgW+' '+totalH+'" xmlns="http://www.w3.org/2000/svg">'+
+    hourLabels+cells+'</svg>';
+  if(info)info.textContent=snaps.length+' snaps · '+allNs.length+' ns';
+}
+
+/* ── Deployment Impact Timeline — Row 3 right ────────────────────────── */
+function renderDeployTimeline(rstData,metricsData){
+  var el=document.getElementById('deploy-timeline-container');
+  if(!el)return;
+  var evts=(rstData&&rstData.deploy_events)||[];
+  var pods=(rstData&&rstData.pods)||[];
+  var snaps=(metricsData&&metricsData.snaps)||[];
+
+  var W=el.offsetWidth||320,H=120,PL=6,PR=6,PT=14,PB=18;
+  var cw=W-PL-PR,ch=H-PT-PB;
+
+  /* time range: last 24h */
+  var now=Date.now();
+  var t0=now-86400000,t1=now;
+  function tx(ts){return PL+cw*(new Date(ts).getTime()-t0)/(t1-t0);}
+
+  /* ── series: restarts per hour or cpu over time ── */
+  var seriesPath='';
+  if(_dtField==='restarts'){
+    /* bucket pod total restarts is static — use restart count as a flat bar */
+    /* instead show per-snap pod count changes as a proxy for activity */
+    if(snaps.length>=2){
+      var pts=snaps.filter(function(s){return new Date(s.ts).getTime()>=t0;});
+      if(pts.length>=2){
+        var maxPods=Math.max.apply(null,pts.map(function(s){
+          return Object.values(s.pods||{}).reduce(function(a,b){return a+b;},0);}));
+        if(!maxPods)maxPods=1;
+        var pathD=pts.map(function(s,i){
+          var x=tx(s.ts);
+          var total=Object.values(s.pods||{}).reduce(function(a,b){return a+b;},0);
+          var y=PT+ch-(ch*total/maxPods);
+          return (i===0?'M':'L')+x.toFixed(1)+','+y.toFixed(1);
+        }).join(' ');
+        seriesPath='<path d="'+pathD+'" fill="none" stroke="var(--blu)" stroke-width="1.5" stroke-linejoin="round"/>';
+      }
+    }
+  } else {
+    /* cpu: sum across all ns */
+    if(snaps.length>=2){
+      var pts2=snaps.filter(function(s){return new Date(s.ts).getTime()>=t0;});
+      if(pts2.length>=2){
+        var maxCpu=Math.max.apply(null,pts2.map(function(s){
+          return Object.values(s.cpu||{}).reduce(function(a,b){return a+b;},0);}));
+        if(!maxCpu)maxCpu=1;
+        var pathD2=pts2.map(function(s,i){
+          var x=tx(s.ts);
+          var total=Object.values(s.cpu||{}).reduce(function(a,b){return a+b;},0);
+          var y=PT+ch-(ch*total/maxCpu);
+          return (i===0?'M':'L')+x.toFixed(1)+','+y.toFixed(1);
+        }).join(' ');
+        seriesPath='<path d="'+pathD2+'" fill="none" stroke="var(--org)" stroke-width="1.5" stroke-linejoin="round"/>';
+      }
+    }
+  }
+
+  /* ── deployment markers ── */
+  var markers='';
+  var recentEvts=evts.filter(function(e){return new Date(e.ts).getTime()>=t0;});
+  recentEvts.forEach(function(e,idx){
+    var x=tx(e.ts);
+    if(x<PL||x>W-PR)return;
+    var color='var(--pur)';
+    markers+='<line x1="'+x.toFixed(1)+'" y1="'+PT+'" x2="'+x.toFixed(1)+'" y2="'+(PT+ch)+
+      '" stroke="'+color+'" stroke-width="1.5" stroke-dasharray="3,2"/>';
+    /* label: alternate above/below to avoid overlap */
+    var labelY=idx%2===0?PT-3:PT+ch+13;
+    var tag=e.tag.length>10?e.tag.substring(0,9)+'…':e.tag;
+    markers+='<text x="'+x.toFixed(1)+'" y="'+labelY+'" text-anchor="middle" font-size="8" fill="#d2a8ff">'+
+      esc(tag)+'</text>';
+  });
+
+  /* x-axis */
+  var xAxis='<line x1="'+PL+'" y1="'+(PT+ch)+'" x2="'+(W-PR)+'" y2="'+(PT+ch)+
+    '" stroke="#30363d" stroke-width="1"/>';
+  for(var i=0;i<=6;i++){
+    var xt=PL+cw*i/6;
+    var ht=new Date(t0+(t1-t0)*i/6);
+    var lbl=('0'+ht.getUTCHours()).slice(-2)+':'+('0'+ht.getUTCMinutes()).slice(-2);
+    xAxis+='<text x="'+xt.toFixed(1)+'" y="'+(PT+ch+11)+'" text-anchor="middle" font-size="8" fill="#8b949e">'+lbl+'</text>';
+  }
+
+  var noDataNote=(!seriesPath&&snaps.length<2)?
+    '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="10" fill="#8b949e">Collecting data…</text>':'';
+  var deplNote=recentEvts.length===0?
+    '<text x="'+(W/2)+'" y="'+(PT+ch-5)+'" text-anchor="middle" font-size="9" fill="#484f58">No deployments in last 24h</text>':'';
+
+  el.innerHTML='<svg width="100%" viewBox="0 0 '+W+' '+H+'" xmlns="http://www.w3.org/2000/svg">'+
+    xAxis+seriesPath+markers+noDataNote+deplNote+'</svg>';
+}
+
+/* ── ATF Top Issues preview ───────────────────────────────────────────── */
+function renderATFIssues(statusData){
+  var el=document.getElementById('atf-issues');
+  var cnt=document.getElementById('atf-issue-count');
+  if(!el)return;
+  var issues=(statusData&&statusData.issues)||[];
+  var sorted=issues.slice().sort(function(a,b){
+    var smap={CRITICAL:0,WARNING:1,INFO:2};
+    return (smap[a.severity]||2)-(smap[b.severity]||2);
+  });
+  var total=sorted.length;
+  if(cnt)cnt.textContent='('+total+' total)';
+  var top=sorted.slice(0,6);
+  if(!top.length){
+    el.innerHTML='<div class="mu" style="font-size:11px;padding:4px 0">&#10003; No active issues</div>';
+    return;
+  }
+  var svcColors={CRITICAL:'var(--red)',WARNING:'var(--yel)',INFO:'var(--blu)'};
+  el.innerHTML=top.map(function(i){
+    var col=svcColors[i.severity]||'var(--mu)';
+    var ns=issNs(i)||'cluster';
+    var rec=(i.recommendation||'').split('.')[0];
+    return '<div class="atf-issue-row">'+
+      '<span style="color:'+col+';font-size:11px;flex-shrink:0;width:10px">&#9679;</span>'+
+      '<span class="atf-issue-ns">'+esc(ns)+'</span>'+
+      '<span class="atf-issue-msg" style="color:'+col+'">'+esc(i.message||i.check||'')+'</span>'+
+      (rec?'<span class="atf-issue-rec">&#8594; '+esc(rec)+'</span>':'')+
+      '</div>';
+  }).join('');
+}
+
+/* ── Master ATF render (called after data arrives) ───────────────────── */
+function renderATF(){
+  var sd=window._statusData||st.d;
+  var rd=window._rstData;
+  var md=window._metricsData;
+  renderGoldenSignals(md,rd,sd);
+  renderOperationalPulse(sd,rd);
+  renderHeatmap(md);
+  renderDeployTimeline(rd,md);
+  renderATFIssues(sd);
+}
+
+/* ─────────────────────────────────────────────────────────────────────── */
 
 function rstBadge(n){
   if(!n)return '<span class="rst-badge rst-0">0</span>';
