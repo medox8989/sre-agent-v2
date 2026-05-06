@@ -113,16 +113,12 @@ fi
 
 # ── Build & push mode ─────────────────────────────────────────────────────────
 if [[ "${1:-}" == "build" ]]; then
-  echo "→ Building image: $OCIR_IMAGE (linux/amd64)"
-  # buildx + --push handles cross-compilation on Apple Silicon (ARM64 host → x86_64 image)
-  # and pushes directly to the registry in one step, avoiding a separate docker push.
-  # Requires Docker Desktop (QEMU pre-installed). If buildx is missing, run:
-  #   docker buildx create --use
-  docker buildx build \
-    --platform linux/amd64 \
-    --push \
-    -t "$OCIR_IMAGE" \
-    "$SCRIPT_DIR"
+  echo "→ Building image: $OCIR_IMAGE"
+  docker build -t "$OCIR_IMAGE" "$SCRIPT_DIR"
+
+  echo "→ Pushing to OCIR..."
+  echo "   (If this fails with 403, run: docker login $OCIR_REGISTRY)"
+  docker push "$OCIR_IMAGE"
   echo "✅ Image pushed: $OCIR_IMAGE"
   echo ""
 fi
