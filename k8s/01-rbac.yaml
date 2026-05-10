@@ -75,6 +75,12 @@ rules:
     resources:
       - horizontalpodautoscalers
     verbs: ["get", "list"]
+  # VPA — read recommendations from the VPA custom resource
+  # Requires VPA CRD to be installed (autoscaling.k8s.io/v1)
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources:
+      - verticalpodautoscalers
+    verbs: ["get", "list", "watch"]
 ---
 # ClusterRoleBinding — bind the role to the agent ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1

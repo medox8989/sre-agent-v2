@@ -1361,6 +1361,126 @@ def _pod_restart_snapshot() -> Dict:
     return result
 
 
+# ── VPA Recommendations ───────────────────────────────────────────────────────
+_vpa_cache:    List[Dict] = []
+_vpa_cache_ts: float      = 0.0
+_VPA_CACHE_TTL             = 300   # seconds — VPA recommender updates slowly
+
+def _read_vpa_recommendations() -> List[Dict]:
+    """Read VPA recommendations cluster-wide via the CustomObjects API.
+
+    Returns a normalised list of per-container recommendation records.
+    Degrades gracefully:
+      - 404 → VPA CRD not installed
+      - 403 → RBAC missing (add autoscaling.k8s.io to ClusterRole)
+      - empty status → recommender hasn't produced data yet
+    """
+    global _vpa_cache, _vpa_cache_ts
+    now = time.time()
+    if _vpa_cache and (now - _vpa_cache_ts) < _VPA_CACHE_TTL:
+        return _vpa_cache
+
+    results: List[Dict] = []
+    try:
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+
+        custom_api = client.CustomObjectsApi()
+
+        # Try v1 first; fall back to v1beta2 for older VPA installations
+        vpa_items: List[Dict] = []
+        for ver in ("v1", "v1beta2"):
+            try:
+                resp = custom_api.list_cluster_custom_object(
+                    group="autoscaling.k8s.io",
+                    version=ver,
+                    plural="verticalpodautoscalers",
+                )
+                vpa_items = resp.get("items", [])
+                break
+            except client.ApiException as e:
+                if e.status in (404, 400):
+                    continue   # try next version
+                raise
+
+        for vpa in vpa_items:
+            meta        = vpa.get("metadata", {})
+            spec        = vpa.get("spec", {})
+            status      = vpa.get("status", {})
+            ns          = meta.get("namespace", "")
+            vpa_name    = meta.get("name", "")
+            target_ref  = spec.get("targetRef", {})
+            update_mode = spec.get("updatePolicy", {}).get("updateMode", "Off")
+
+            conditions   = status.get("conditions", [])
+            rec_provided = any(
+                c.get("type") == "RecommendationProvided" and c.get("status") == "True"
+                for c in conditions
+            )
+            no_pods = any(
+                c.get("type") == "NoPodsMatched" and c.get("status") == "True"
+                for c in conditions
+            )
+
+            container_recs = status.get("recommendation", {}).get(
+                "containerRecommendations", []
+            )
+
+            if not container_recs:
+                results.append({
+                    "ns": ns, "vpa_name": vpa_name,
+                    "target_kind": target_ref.get("kind", "Deployment"),
+                    "target_name": target_ref.get("name", ""),
+                    "update_mode": update_mode,
+                    "container": "", "ready": False, "no_pods": no_pods,
+                    "target_cpu": "",   "target_mem": "",
+                    "lower_cpu":  "",   "lower_mem":  "",
+                    "upper_cpu":  "",   "upper_mem":  "",
+                    "uncapped_cpu": "", "uncapped_mem": "",
+                })
+                continue
+
+            for cr in container_recs:
+                target = cr.get("target",        {})
+                lower  = cr.get("lowerBound",    {})
+                upper  = cr.get("upperBound",     {})
+                uncap  = cr.get("uncappedTarget", {})
+                results.append({
+                    "ns":           ns,
+                    "vpa_name":     vpa_name,
+                    "target_kind":  target_ref.get("kind", "Deployment"),
+                    "target_name":  target_ref.get("name", ""),
+                    "update_mode":  update_mode,
+                    "container":    cr.get("containerName", ""),
+                    "ready":        rec_provided,
+                    "no_pods":      no_pods,
+                    "target_cpu":   target.get("cpu",    ""),
+                    "target_mem":   target.get("memory", ""),
+                    "lower_cpu":    lower.get("cpu",    ""),
+                    "lower_mem":    lower.get("memory", ""),
+                    "upper_cpu":    upper.get("cpu",    ""),
+                    "upper_mem":    upper.get("memory", ""),
+                    "uncapped_cpu": uncap.get("cpu",    ""),
+                    "uncapped_mem": uncap.get("memory", ""),
+                })
+
+    except client.ApiException as e:
+        if e.status == 404:
+            logging.debug("VPA CRD not installed — skipping")
+        elif e.status == 403:
+            logging.warning("VPA RBAC denied (403) — add autoscaling.k8s.io to ClusterRole")
+        else:
+            logging.warning("VPA API error %s: %s", e.status, e.reason)
+    except Exception as e:
+        logging.warning("VPA read error: %s", e)
+
+    _vpa_cache    = results
+    _vpa_cache_ts = time.time()
+    return results
+
+
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  WEB UI  — self-contained dashboard served at /                  ║
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -1605,6 +1725,15 @@ tr:hover td{background:var(--bg3);}
   </div>
   <div id="cost-table"></div>
   <p id="cost-methodology" class="mu" style="font-size:10px;margin-top:10px;line-height:1.7"></p>
+</section>
+
+<!-- ── VPA Recommendations ─────────────────────────────────────── -->
+<section>
+  <h2>&#9651; VPA Recommendations <span class="cnt" id="vpa-cnt"></span></h2>
+  <div id="vpa-unavail" class="res-unavail" style="display:none">
+    &#9888;&#65039; VPA CRD not found &mdash; install the VPA recommender to enable recommendations.
+  </div>
+  <div id="vpa-table"></div>
 </section>
 
 <!-- ── Issues ──────────────────────────────────────────────────────── -->
@@ -2182,6 +2311,7 @@ function fetchAll(){
   fetch('/api/ns-metrics?hours='+st.h).then(function(r){return r.json();}).then(renderMetrics).catch(function(){});
   fetchPodTimeline();
   fetchRestarts();
+  fetchVpa();
 }
 
 /* ── Pod timeline fetch + render ─────────────────────────────────── */
@@ -2697,6 +2827,91 @@ function renderCost(data){
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ *  VPA RECOMMENDATIONS
+ * ═══════════════════════════════════════════════════════════════════ */
+
+function fetchVpa(){
+  fetch('/api/vpa')
+    .then(function(r){return r.json();})
+    .then(renderVpa)
+    .catch(function(){});
+}
+
+function renderVpa(data){
+  var el=document.getElementById('vpa-table');
+  var cnt=document.getElementById('vpa-cnt');
+  var unavEl=document.getElementById('vpa-unavail');
+  if(!el)return;
+
+  /* CRD not installed — empty array returned */
+  if(!data||data.length===0){
+    if(unavEl)unavEl.style.display='';
+    el.innerHTML='';
+    if(cnt)cnt.textContent='';
+    return;
+  }
+  if(unavEl)unavEl.style.display='none';
+
+  var ready=data.filter(function(r){return r.ready;});
+  var pending=data.filter(function(r){return !r.ready;});
+  if(cnt)cnt.textContent='('+ready.length+' ready, '+pending.length+' pending)';
+
+  /* apply global namespace filter */
+  var filtered=st.gf
+    ?ready.filter(function(r){return r.ns.toLowerCase().indexOf(st.gf.toLowerCase())>=0;})
+    :ready;
+
+  /* populate global namespace datalist */
+  _addNsToSet(data.map(function(r){return r.ns;}).filter(Boolean));
+
+  /* mode badge color */
+  function modeCol(m){return m==='Auto'?'var(--grn)':m==='Initial'?'var(--yel)':'var(--mu)';}
+
+  var rows=filtered.map(function(r){
+    return '<tr>'+
+      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(r.ns)+'</span></td>'+
+      '<td class="mono mu" style="font-size:11px">'+esc(r.target_kind)+'/'+esc(r.target_name)+'</td>'+
+      '<td class="mono mu">'+esc(r.container)+'</td>'+
+      '<td style="color:'+modeCol(r.update_mode)+';font-size:10px;font-weight:600">'+esc(r.update_mode)+'</td>'+
+      /* CPU */
+      '<td class="mono" style="color:var(--blu);font-weight:600">'+esc(r.target_cpu||'—')+'</td>'+
+      '<td class="mono mu" style="font-size:10px">'+esc(r.lower_cpu||'—')+' &ndash; '+esc(r.upper_cpu||'—')+'</td>'+
+      '<td class="mono" style="color:var(--mu);font-size:10px">'+esc(r.uncapped_cpu||'—')+'</td>'+
+      /* Memory */
+      '<td class="mono" style="color:var(--pur);font-weight:600">'+esc(r.target_mem||'—')+'</td>'+
+      '<td class="mono mu" style="font-size:10px">'+esc(r.lower_mem||'—')+' &ndash; '+esc(r.upper_mem||'—')+'</td>'+
+      '<td class="mono" style="color:var(--mu);font-size:10px">'+esc(r.uncapped_mem||'—')+'</td>'+
+      '</tr>';
+  }).join('');
+
+  /* pending rows (VPA exists but recommender hasn't produced data yet) */
+  var pendingRows=pending.map(function(r){
+    var reason=r.no_pods
+      ?'<span style="color:var(--red);font-size:10px">&#9888; No pods matched — check targetRef</span>'
+      :'<span style="color:var(--mu);font-size:10px">&#9203; Collecting data&hellip; (recommender needs 30 min+)</span>';
+    return '<tr style="opacity:.55">'+
+      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(r.ns)+'</span></td>'+
+      '<td class="mono mu" style="font-size:11px">'+esc(r.target_kind)+'/'+esc(r.target_name)+'</td>'+
+      '<td class="mono mu">'+esc(r.container||'—')+'</td>'+
+      '<td style="color:'+modeCol(r.update_mode)+';font-size:10px">'+esc(r.update_mode)+'</td>'+
+      '<td colspan="6">'+reason+'</td>'+
+      '</tr>';
+  }).join('');
+
+  if(!rows&&!pendingRows){
+    el.innerHTML='<p class="empty">No VPA recommendations yet. The recommender needs to observe workloads before producing data.</p>';
+    return;
+  }
+
+  el.innerHTML=
+    '<table><thead><tr>'+
+    '<th>Namespace</th><th>Target</th><th>Container</th><th>Mode</th>'+
+    '<th>CPU Target</th><th>CPU Range (lo &ndash; hi)</th><th>CPU Uncapped</th>'+
+    '<th>Mem Target</th><th>Mem Range (lo &ndash; hi)</th><th>Mem Uncapped</th>'+
+    '</tr></thead><tbody>'+rows+pendingRows+'</tbody></table>';
+}
+
 /* ── progress bar + auto-refresh ─────────────────────────────────── */
 function tick(){
   _el++;
@@ -2797,6 +3012,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/pod-restarts":
             body = json.dumps(_pod_restart_snapshot(), default=str).encode()
+            self._serve(body, "application/json")
+
+        elif path == "/api/vpa":
+            body = json.dumps(_read_vpa_recommendations(), default=str).encode()
             self._serve(body, "application/json")
 
         else:
