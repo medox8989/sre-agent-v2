@@ -851,9 +851,14 @@ class MetricsCollector:
 
     Degrades gracefully when metrics-server is not installed — returns empty
     data and sets available=False rather than raising.
+
+    MAX_SNAPS sizing:
+      24 h × 60 min/h × 1 snap/min = 1440 entries for full 24-hour window.
+      The previous value of 300 caused the hard cap to be hit first
+      (300 × 60 s = 5 h), making the 24h selector show only ~5 h of data.
     """
     MAX_AGE_HOURS  = 24
-    MAX_SNAPS      = 300
+    MAX_SNAPS      = 1440   # 24 h × 60 min — was 300 (only covered ~5 h)
     MAX_10M_SNAPS  = 1010   # 7 d × 24 h × 6/h + margin
     MAX_1H_SNAPS   =  730   # 30 d × 24 h + margin
 
@@ -1330,6 +1335,22 @@ def _pod_restart_snapshot() -> Dict:
                 "metrics_live": metrics_available,
             }
 
+        # Agent start time — cost tracking began when the pod started.
+        # Expose this so the dashboard can tell clients "cost data since <date>".
+        agent_start_iso = datetime.utcfromtimestamp(_agent_start_time).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        hours_running = (time.time() - _agent_start_time) / 3600.0
+
+        # "Cost so far" = projected monthly rate × fraction of month elapsed since start.
+        # This gives a concrete accumulated figure clients can verify against their OCI bill.
+        # Formula: cost_month × (hours_running / (24 × 30))
+        month_hours = 24.0 * 30.0
+        for ns_key in by_ns:
+            by_ns[ns_key]["cost_so_far"] = round(
+                by_ns[ns_key]["cost_month"] * (hours_running / month_hours), 4
+            )
+
         result = {
             "pods": pods,
             "cost": {
@@ -1348,6 +1369,9 @@ def _pod_restart_snapshot() -> Dict:
                 "total_cost_3y_month":    round(total_cost_month * (1 - COMMIT_3Y_DISC), 2),
                 "cluster_cpu_alloc_m":    cluster_cpu_m,
                 "cluster_mem_alloc_mi":   cluster_mem_mi,
+                # Tracking window — cost figures are projected from this start time
+                "agent_start_iso":        agent_start_iso,
+                "hours_running":          round(hours_running, 2),
                 "by_ns":                  by_ns,
             },
         }
@@ -1839,6 +1863,14 @@ function fmtCpuM(m){
 function fmtCpuTick(m){return m>=1000?(m/1000).toFixed(1)+'c':Math.round(m)+'m';}
 function fmtMemGi(mi){return (mi/1024).toFixed(2)+' Gi';}
 function fmtMemTick(mi){return mi>=1024?(mi/1024).toFixed(1)+'Gi':Math.round(mi)+'Mi';}
+/* Format hours as "Xd Yh" or "Zh" for the cost tracking banner */
+function fmtAge(hrs){
+  var h=Math.floor(hrs);
+  var d=Math.floor(h/24);
+  var rem=h%24;
+  if(d>0)return d+'d '+rem+'h';
+  return h+'h '+(Math.round((hrs-h)*60))+'m';
+}
 
 /* ── window / severity filters ──────────────────────────────────────── */
 function setH(h){
@@ -2778,6 +2810,8 @@ function renderCost(data){
     var cpuCell=n.cpu_pct+'%'+(live&&n.cpu_util_m?'<br><span class="mu" style="font-size:10px">'+fmtCpuM(n.cpu_util_m)+'</span>':'');
     var memCell=n.mem_pct+'%'+(live&&n.mem_util_mi?'<br><span class="mu" style="font-size:10px">'+fmtMemGi(n.mem_util_mi)+'</span>':'');
 
+    var sfTip='Cost so far since agent start ('+fmtAge(c.hours_running||0)+'): $'+
+              (n.cost_so_far||0).toFixed(4);
     return '<tr>'+
       '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(ns)+'</span></td>'+
       '<td style="text-align:center" class="mono mu">'+n.pods+'</td>'+
@@ -2790,7 +2824,7 @@ function renderCost(data){
       '<td>'+
         '<div class="cost-bar-wrap"><div class="cost-bar" style="width:'+barW+'%;background:'+barCol+'"></div></div>'+
       '</td>'+
-      '<td class="mono" style="font-weight:700;color:'+barCol+'">$'+n.cost_month.toFixed(2)+'</td>'+
+      '<td class="mono" style="font-weight:700;color:'+barCol+'" title="Projected: if allocation stayed constant for 30 days. '+sfTip+'">$'+n.cost_month.toFixed(2)+'</td>'+
       '</tr>';
   });
 
@@ -2804,6 +2838,20 @@ function renderCost(data){
   var save1y = (c.total_cost_month - cost1y).toFixed(2);
   var save3y = (c.total_cost_month - cost3y).toFixed(2);
 
+  /* ── agent start / tracking window banner ── */
+  var startLabel=c.agent_start_iso
+    ?'Tracking since: <b style="color:var(--tx)">'+esc(c.agent_start_iso)+'</b>'
+     +' &nbsp;('+fmtAge(c.hours_running||0)+')'
+     +' &nbsp;&#8212;&nbsp; <span style="color:var(--mu)">$/month column is a projected rate based on current requests.'+
+        ' Hover any cell for "cost so far".</span>'
+    :'';
+  if(startLabel){
+    rows.push('<tr style="background:rgba(88,166,255,.05)">'+
+      '<td colspan="10" style="font-size:11px;padding:5px 8px;color:var(--mu)">'+
+        '&#128197; '+startLabel+
+      '</td></tr>');
+  }
+
   /* PAYG total */
   rows.push(
     '<tr style="border-top:2px solid var(--bd)">'+
@@ -2811,7 +2859,7 @@ function renderCost(data){
     '<td></td><td></td><td></td><td></td><td></td><td></td>'+
     '<td class="mono mu">'+c.total_nodes+' nodes</td>'+
     '<td style="color:var(--mu);font-size:10px">Pay-as-you-go</td>'+
-    '<td class="mono" style="font-weight:700;color:var(--tx)">$'+c.total_cost_month.toFixed(2)+'/mo</td>'+
+    '<td class="mono" style="font-weight:700;color:var(--tx)" title="Projected monthly rate for all namespaces combined">$'+c.total_cost_month.toFixed(2)+'/mo</td>'+
     '</tr>');
 
   /* 1-year Universal Credit row */
@@ -2841,24 +2889,31 @@ function renderCost(data){
   el.innerHTML='<table><thead><tr>'+
     '<th>Namespace</th><th>Pods</th><th>CPU Req</th><th>RAM Req</th>'+
     '<th>CPU %</th><th>RAM %</th><th>Driver</th>'+
-    '<th>Node Equiv</th><th>Pricing tier</th><th>$/month</th>'+
+    '<th>Node Equiv</th><th>Pricing tier</th>'+
+    '<th title="Projected monthly rate — cost if this namespace ran at current allocation for a full 30-day month. Hover each cell for actual cost accrued since agent start.">$/month &#9432;</th>'+
     '</tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 
   /* methodology note */
   if(me){
-    me.innerHTML='<b>Methodology</b> &nbsp;&#8212;&nbsp; '+
-      'Instance: '+esc(c.oci_instance)+
+    me.innerHTML=
+      '<b>How $/month is calculated</b> &mdash; '+
+      'This is a <b>projected monthly rate</b>, not an accumulated bill. '+
+      'It answers: "if this namespace kept its current resource requests for a full 30-day month, what would it cost?" &nbsp;'+
+      'Formula: <code>max(CPU req share, RAM req share) &times; cluster total cost/month</code>. '+
+      'Hover any cost cell to see the actual amount accrued since agent start.'+
+      '<br>'+
+      '&#128197; <b>Tracking since:</b> '+(c.agent_start_iso||'unknown')+
+      ' ('+fmtAge(c.hours_running||0)+' ago) &nbsp;&mdash;&nbsp; '+
+      'cost figures reset if the agent pod restarts.&nbsp;'+
+      '&#128200; Instance: '+esc(c.oci_instance)+
       ' ('+c.ocpu_per_node+' OCPU + '+c.ram_gi_per_node+' Gi RAM)&nbsp;'+
-      ' &middot; Pay-as-you-go: $'+c.price_ocpu_hr+'/OCPU-hr + $'+c.price_ram_gb_hr+'/GB-hr&nbsp;'+
-      ' &middot; Node cost: <b>$'+c.node_cost_month+'/month</b>&nbsp;'+
-      ' &middot; '+c.total_nodes+' nodes &times; $'+c.node_cost_month+' = <b>$'+c.total_cost_month+'/month</b>&nbsp;'+
-      ' &middot; 1-yr UC: '+savePct1y+'% off → <b>$'+cost1y.toFixed(2)+'/month</b>&nbsp;'+
-      ' &middot; 3-yr UC: '+savePct3y+'% off → <b>$'+cost3y.toFixed(2)+'/month</b>&nbsp;'+
-      ' &middot; Cost share = max(CPU req%, RAM req%) of cluster allocatable.'+
-      ' &middot; <b>Driver badge</b> uses utilization efficiency (actual÷requested) when live metrics are available,'+
-      ' so over-provisioned CPU requests do not mask RAM pressure.'+
-      ' Hover the badge for per-namespace efficiency detail.'+
-      ' Override via env vars: <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>'+
+      ' &middot; PAYG: $'+c.price_ocpu_hr+'/OCPU-hr + $'+c.price_ram_gb_hr+'/GB-hr&nbsp;'+
+      ' &middot; Node: <b>$'+c.node_cost_month+'/mo</b>&nbsp;'+
+      ' &middot; '+c.total_nodes+' nodes &times; $'+c.node_cost_month+' = <b>$'+c.total_cost_month+'/mo</b>&nbsp;'+
+      ' &middot; 1-yr UC: '+savePct1y+'% off &rarr; <b>$'+cost1y.toFixed(2)+'/mo</b>&nbsp;'+
+      ' &middot; 3-yr UC: '+savePct3y+'% off &rarr; <b>$'+cost3y.toFixed(2)+'/mo</b>&nbsp;'+
+      ' &middot; <b>Driver badge</b>: CPU/RAM bound by utilization efficiency (actual&divide;requested) when live metrics available.'+
+      ' Override: <code>OCI_OCPU_PRICE_HR</code> / <code>OCI_RAM_GB_PRICE_HR</code>'+
       ' / <code>OCI_COMMIT_1Y_DISCOUNT</code> / <code>OCI_COMMIT_3Y_DISCOUNT</code>.';
   }
 }
