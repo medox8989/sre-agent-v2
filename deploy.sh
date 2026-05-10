@@ -179,12 +179,12 @@ elif [[ "$OCIR_SECRET_MODE" == "create" ]]; then
 fi
 
 # ── Apply deployment with the correct image ───────────────────────────────────
-# Patch the image inline so we don't have to edit the YAML for every cluster/tag
+# Substitute the placeholder in 05-deployment.yaml before applying so that
+# only ONE ReplicaSet is created with the correct image from the start.
+# This avoids the dual-RS problem (old RS with wrong image + new RS racing).
 echo "→ Applying deployment (image: $OCIR_IMAGE)..."
-kubectl apply -f "$K8S_DIR/05-deployment.yaml"
-kubectl set image deployment/sre-agent \
-  sre-agent="$OCIR_IMAGE" \
-  -n "$NAMESPACE"
+sed "s|DEPLOY_IMAGE_PLACEHOLDER|${OCIR_IMAGE}|g" "$K8S_DIR/05-deployment.yaml" \
+  | kubectl apply -f -
 
 kubectl apply -f "$K8S_DIR/06-service.yaml"
 # Note: 07-servicemonitor.yaml is not applied — the v4 agent no longer exposes

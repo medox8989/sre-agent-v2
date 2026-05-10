@@ -48,8 +48,8 @@ spec:
 
       containers:
         - name: sre-agent
-          # ── IMPORTANT: update tag when you rebuild ──────────────────────
-          image: jed.ocir.io/ax39qm2olrf8/jamiat-images:sre-agent-v5
+          # ── Image is injected by deploy.sh via sed before kubectl apply ──
+          image: DEPLOY_IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent   # versioned tag — no need to re-pull on every restart
 
           # Default: continuous loop.
