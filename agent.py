@@ -1388,6 +1388,27 @@ def _read_vpa_recommendations() -> List[Dict]:
             config.load_kube_config()
 
         custom_api = client.CustomObjectsApi()
+        apps_api   = client.AppsV1Api()
+
+        # Build current resource lookup so we can show Current → Suggested diff
+        # {(ns, deploy_name): {container_name: {cur_cpu_req, cur_mem_req, cur_cpu_lim, cur_mem_lim}}}
+        deploy_res: Dict[tuple, Dict[str, Dict]] = {}
+        try:
+            for dep in apps_api.list_deployment_for_all_namespaces(limit=500).items:
+                key = (dep.metadata.namespace, dep.metadata.name)
+                deploy_res[key] = {}
+                for c in (dep.spec.template.spec.containers or []):
+                    r   = c.resources or client.V1ResourceRequirements()
+                    req = dict(r.requests or {})
+                    lim = dict(r.limits   or {})
+                    deploy_res[key][c.name] = {
+                        "cur_cpu_req": req.get("cpu",    ""),
+                        "cur_mem_req": req.get("memory", ""),
+                        "cur_cpu_lim": lim.get("cpu",    ""),
+                        "cur_mem_lim": lim.get("memory", ""),
+                    }
+        except Exception as exc:
+            logging.debug("VPA: could not fetch deployment resources: %s", exc)
 
         # Try v1 first; fall back to v1beta2 for older VPA installations
         vpa_items: List[Dict] = []
@@ -1428,6 +1449,9 @@ def _read_vpa_recommendations() -> List[Dict]:
                 "containerRecommendations", []
             )
 
+            # Current resources for this deployment's containers
+            dep_containers = deploy_res.get((ns, target_ref.get("name", "")), {})
+
             if not container_recs:
                 results.append({
                     "ns": ns, "vpa_name": vpa_name,
@@ -1439,21 +1463,25 @@ def _read_vpa_recommendations() -> List[Dict]:
                     "lower_cpu":  "",   "lower_mem":  "",
                     "upper_cpu":  "",   "upper_mem":  "",
                     "uncapped_cpu": "", "uncapped_mem": "",
+                    "cur_cpu_req": "", "cur_mem_req": "",
+                    "cur_cpu_lim": "", "cur_mem_lim": "",
                 })
                 continue
 
             for cr in container_recs:
+                cname  = cr.get("containerName", "")
                 target = cr.get("target",        {})
                 lower  = cr.get("lowerBound",    {})
                 upper  = cr.get("upperBound",     {})
                 uncap  = cr.get("uncappedTarget", {})
+                cur    = dep_containers.get(cname, {})
                 results.append({
                     "ns":           ns,
                     "vpa_name":     vpa_name,
                     "target_kind":  target_ref.get("kind", "Deployment"),
                     "target_name":  target_ref.get("name", ""),
                     "update_mode":  update_mode,
-                    "container":    cr.get("containerName", ""),
+                    "container":    cname,
                     "ready":        rec_provided,
                     "no_pods":      no_pods,
                     "target_cpu":   target.get("cpu",    ""),
@@ -1464,6 +1492,10 @@ def _read_vpa_recommendations() -> List[Dict]:
                     "upper_mem":    upper.get("memory", ""),
                     "uncapped_cpu": uncap.get("cpu",    ""),
                     "uncapped_mem": uncap.get("memory", ""),
+                    "cur_cpu_req":  cur.get("cur_cpu_req", ""),
+                    "cur_mem_req":  cur.get("cur_mem_req", ""),
+                    "cur_cpu_lim":  cur.get("cur_cpu_lim", ""),
+                    "cur_mem_lim":  cur.get("cur_mem_lim", ""),
                 })
 
     except client.ApiException as e:
@@ -1521,6 +1553,10 @@ header h1{font-size:15px;font-weight:700;}
      border-radius:4px;cursor:pointer;font-size:12px;transition:background .12s;}
 .btn:hover{background:#2d333b;}
 .btn.on{background:#1f6feb;border-color:#388bfd;color:#fff;}
+.vpa-tab{background:var(--bg3);border:1px solid var(--bd);color:var(--mu);padding:3px 12px;
+         border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;transition:all .12s;}
+.vpa-tab:hover{background:#2d333b;color:var(--tx);}
+.vpa-tab.vpa-tab-on{background:rgba(88,166,255,.15);border-color:var(--blu);color:var(--blu);}
 .sev-C{color:var(--red);}   .sev-C.on{background:rgba(248,81,73,.15);border-color:var(--red);}
 .sev-W{color:var(--yel);}   .sev-W.on{background:rgba(227,179,65,.15);border-color:var(--yel);}
 .sev-I{color:var(--blu);}   .sev-I.on{background:rgba(88,166,255,.15);border-color:var(--blu);}
@@ -2838,78 +2874,201 @@ function fetchVpa(){
     .catch(function(){});
 }
 
+/* ── VPA QoS tab switcher ─────────────────────────────────────── */
+function vpaTab(uid,which){
+  var pg=document.getElementById(uid+'pg');
+  var pb=document.getElementById(uid+'pb');
+  var tg=document.getElementById(uid+'tg');
+  var tb=document.getElementById(uid+'tb');
+  if(!pg||!pb)return;
+  if(which==='g'){
+    pg.style.display='';pb.style.display='none';
+    if(tg)tg.className='vpa-tab vpa-tab-on';if(tb)tb.className='vpa-tab';
+  }else{
+    pg.style.display='none';pb.style.display='';
+    if(tg)tg.className='vpa-tab';if(tb)tb.className='vpa-tab vpa-tab-on';
+  }
+}
+
+/* ── copy YAML snippet ────────────────────────────────────────── */
+function copyVpaYaml(id){
+  var pre=document.getElementById(id);
+  if(!pre)return;
+  var txt=pre.textContent||pre.innerText||'';
+  var btn=pre.nextElementSibling;
+  function flash(){if(btn){var o=btn.textContent;btn.textContent='Copied!';setTimeout(function(){btn.textContent=o;},1500);}}
+  if(navigator.clipboard){navigator.clipboard.writeText(txt).then(flash);}
+  else{var ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);flash();}
+}
+
 function renderVpa(data){
   var el=document.getElementById('vpa-table');
   var cnt=document.getElementById('vpa-cnt');
   var unavEl=document.getElementById('vpa-unavail');
   if(!el)return;
 
-  /* CRD not installed — empty array returned */
   if(!data||data.length===0){
     if(unavEl)unavEl.style.display='';
-    el.innerHTML='';
-    if(cnt)cnt.textContent='';
+    el.innerHTML='';if(cnt)cnt.textContent='';
     return;
   }
   if(unavEl)unavEl.style.display='none';
 
-  var ready=data.filter(function(r){return r.ready;});
-  var pending=data.filter(function(r){return !r.ready;});
-  if(cnt)cnt.textContent='('+ready.length+' ready, '+pending.length+' pending)';
+  var nReady=data.filter(function(r){return r.ready;}).length;
+  var nPend =data.filter(function(r){return !r.ready;}).length;
+  if(cnt)cnt.textContent='('+nReady+' ready, '+nPend+' pending)';
 
-  /* apply global namespace filter */
-  var filtered=st.gf
-    ?ready.filter(function(r){return r.ns.toLowerCase().indexOf(st.gf.toLowerCase())>=0;})
-    :ready;
-
-  /* populate global namespace datalist */
+  var gf=(st.gf||'').toLowerCase();
+  var filtered=gf?data.filter(function(r){return r.ns.toLowerCase().indexOf(gf)>=0;}):data;
   _addNsToSet(data.map(function(r){return r.ns;}).filter(Boolean));
 
-  /* mode badge color */
-  function modeCol(m){return m==='Auto'?'var(--grn)':m==='Initial'?'var(--yel)':'var(--mu)';}
+  /* ── Group: ns → depKey → {kind, name, update_mode, containers[]} ── */
+  var nsMap={};
+  filtered.forEach(function(r){
+    if(!nsMap[r.ns])nsMap[r.ns]={};
+    var dk=r.target_kind+'/'+r.target_name;
+    if(!nsMap[r.ns][dk])nsMap[r.ns][dk]={kind:r.target_kind,name:r.target_name,update_mode:r.update_mode,containers:[]};
+    nsMap[r.ns][dk].containers.push(r);
+  });
 
-  var rows=filtered.map(function(r){
-    return '<tr>'+
-      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(r.ns)+'</span></td>'+
-      '<td class="mono mu" style="font-size:11px">'+esc(r.target_kind)+'/'+esc(r.target_name)+'</td>'+
-      '<td class="mono mu">'+esc(r.container)+'</td>'+
-      '<td style="color:'+modeCol(r.update_mode)+';font-size:10px;font-weight:600">'+esc(r.update_mode)+'</td>'+
-      /* CPU */
-      '<td class="mono" style="color:var(--blu);font-weight:600">'+esc(r.target_cpu||'—')+'</td>'+
-      '<td class="mono mu" style="font-size:10px">'+esc(r.lower_cpu||'—')+' &ndash; '+esc(r.upper_cpu||'—')+'</td>'+
-      '<td class="mono" style="color:var(--mu);font-size:10px">'+esc(r.uncapped_cpu||'—')+'</td>'+
-      /* Memory */
-      '<td class="mono" style="color:var(--pur);font-weight:600">'+esc(r.target_mem||'—')+'</td>'+
-      '<td class="mono mu" style="font-size:10px">'+esc(r.lower_mem||'—')+' &ndash; '+esc(r.upper_mem||'—')+'</td>'+
-      '<td class="mono" style="color:var(--mu);font-size:10px">'+esc(r.uncapped_mem||'—')+'</td>'+
-      '</tr>';
-  }).join('');
+  /* ── Helpers ─────────────────────────────────────────────────── */
+  function modeCol(m){return m==='Auto'?'var(--grn)':m==='Initial'?'var(--yel)':m==='InPlaceOrRecreate'?'var(--org)':'var(--mu)';}
 
-  /* pending rows (VPA exists but recommender hasn't produced data yet) */
-  var pendingRows=pending.map(function(r){
-    var reason=r.no_pods
-      ?'<span style="color:var(--red);font-size:10px">&#9888; No pods matched — check targetRef</span>'
-      :'<span style="color:var(--mu);font-size:10px">&#9203; Collecting data&hellip; (recommender needs 30 min+)</span>';
-    return '<tr style="opacity:.55">'+
-      '<td><span style="background:#1c2128;border-radius:3px;padding:1px 6px;font-size:11px">'+esc(r.ns)+'</span></td>'+
-      '<td class="mono mu" style="font-size:11px">'+esc(r.target_kind)+'/'+esc(r.target_name)+'</td>'+
-      '<td class="mono mu">'+esc(r.container||'—')+'</td>'+
-      '<td style="color:'+modeCol(r.update_mode)+';font-size:10px">'+esc(r.update_mode)+'</td>'+
-      '<td colspan="6">'+reason+'</td>'+
-      '</tr>';
-  }).join('');
-
-  if(!rows&&!pendingRows){
-    el.innerHTML='<p class="empty">No VPA recommendations yet. The recommender needs to observe workloads before producing data.</p>';
-    return;
+  function parseMem(v){
+    if(!v||v==='—')return null;v=String(v).trim();
+    if(/^[0-9]+$/.test(v))return parseInt(v,10);
+    var n=parseFloat(v);
+    if(v.endsWith('Gi'))return n*1073741824;if(v.endsWith('Mi'))return n*1048576;
+    if(v.endsWith('Ki'))return n*1024;if(v.endsWith('G'))return n*1e9;
+    if(v.endsWith('M'))return n*1e6;if(v.endsWith('k'))return n*1000;
+    return null;
+  }
+  function parseCpu(v){
+    if(!v||v==='—')return null;v=String(v).trim();
+    if(v.endsWith('m'))return parseInt(v,10);
+    return Math.round(parseFloat(v)*1000);
+  }
+  function fmtMem(v){
+    if(!v)return '—';var b=parseMem(v);if(b===null)return v;
+    if(b>=1073741824)return (b/1073741824).toFixed(1).replace(/\.0$/,'')+'Gi';
+    if(b>=1048576)return Math.round(b/1048576)+'Mi';
+    if(b>=1024)return Math.round(b/1024)+'Ki';
+    return b+'';
+  }
+  /* orange > = changed, blue = = same, grey → = unknown */
+  function arrowCell(curStr,recStr,isMem){
+    if(!curStr||!recStr)return '<td style="text-align:center;padding:2px 8px;color:var(--mu)">&#8594;</td>';
+    var cur=isMem?parseMem(curStr):parseCpu(curStr);
+    var rec=isMem?parseMem(recStr):parseCpu(recStr);
+    if(cur===null||rec===null)return '<td style="text-align:center;padding:2px 8px;color:var(--mu)">&#8594;</td>';
+    var tol=isMem?1048576:1;
+    if(Math.abs(cur-rec)<=tol)return '<td style="text-align:center;padding:2px 8px;color:var(--blu);font-size:15px;font-weight:700">=</td>';
+    return '<td style="text-align:center;padding:2px 8px;color:var(--org);font-size:15px;font-weight:700">&gt;</td>';
   }
 
-  el.innerHTML=
-    '<table><thead><tr>'+
-    '<th>Namespace</th><th>Target</th><th>Container</th><th>Mode</th>'+
-    '<th>CPU Target</th><th>CPU Range (lo &ndash; hi)</th><th>CPU Uncapped</th>'+
-    '<th>Mem Target</th><th>Mem Range (lo &ndash; hi)</th><th>Mem Uncapped</th>'+
-    '</tr></thead><tbody>'+rows+pendingRows+'</tbody></table>';
+  /* Build per-QoS rows: Guaranteed (req=lim=target) | Burstable (req=lower, lim=upper) */
+  function qosRows(c,isGuaranteed){
+    var cpuReq=isGuaranteed?c.target_cpu:c.lower_cpu;
+    var cpuLim=isGuaranteed?c.target_cpu:c.upper_cpu;
+    var memReq=isGuaranteed?c.target_mem:c.lower_mem;
+    var memLim=isGuaranteed?c.target_mem:c.upper_mem;
+    var rows=[
+      {lbl:'CPU Request',cur:c.cur_cpu_req,rec:cpuReq,mem:false},
+      {lbl:'CPU Limit',  cur:c.cur_cpu_lim,rec:cpuLim,mem:false},
+      {lbl:'Mem Request',cur:c.cur_mem_req, rec:memReq,mem:true},
+      {lbl:'Mem Limit',  cur:c.cur_mem_lim, rec:memLim,mem:true},
+    ];
+    return rows.map(function(row){
+      var curFmt=row.mem?fmtMem(row.cur):row.cur||'—';
+      var recFmt=row.mem?fmtMem(row.rec):row.rec||'—';
+      return '<tr>'+
+        '<td style="color:var(--mu);font-size:11px;padding:3px 14px 3px 0;white-space:nowrap">'+row.lbl+'</td>'+
+        '<td class="mono" style="font-size:12px;padding:3px 10px 3px 0;min-width:70px">'+esc(curFmt||'—')+'</td>'+
+        arrowCell(row.cur,row.rec,row.mem)+
+        '<td class="mono" style="font-size:12px;padding:3px 0;color:var(--grn);font-weight:600">'+esc(recFmt||'—')+'</td>'+
+        '</tr>';
+    }).join('');
+  }
+
+  function yamlBlock(cpuReq,cpuLim,memReq,memLim,yid){
+    var yaml='resources:\n  limits:\n    cpu: '+(cpuLim||'—')+
+             '\n    memory: '+(fmtMem(memLim)||memLim||'—')+
+             '\n  requests:\n    cpu: '+(cpuReq||'—')+
+             '\n    memory: '+(fmtMem(memReq)||memReq||'—');
+    return '<div style="position:relative;margin-top:10px">'+
+      '<pre id="'+yid+'" style="background:var(--bg);border:1px solid var(--bd);border-radius:4px;'+
+      'padding:8px 50px 8px 12px;font-size:11px;color:var(--blu);line-height:1.8;white-space:pre">'+esc(yaml)+'</pre>'+
+      '<button onclick="copyVpaYaml(\''+yid+'\')" style="position:absolute;top:5px;right:5px;'+
+      'background:var(--bg3);border:1px solid var(--bd);color:var(--tx);border-radius:3px;'+
+      'padding:3px 10px;cursor:pointer;font-size:10px">Copy</button></div>';
+  }
+
+  var _vi=0;
+  function renderContainer(c){
+    /* pending — no recommendation yet */
+    if(!c.ready){
+      var reason=c.no_pods
+        ?'<span style="color:var(--red)">&#9888; No pods matched &mdash; check VPA targetRef</span>'
+        :'<span style="color:var(--mu)">&#9203; Collecting data&hellip; recommender needs 30 min+ of pod history</span>';
+      return '<div style="padding:8px 14px 10px;border-top:1px solid var(--bd);opacity:.65">'+
+        '<span style="color:var(--mu);font-size:11px;font-weight:600">container: '+
+        '<span style="color:var(--tx)">'+esc(c.container||'?')+'</span></span> '+
+        '<span style="font-size:11px">'+reason+'</span></div>';
+    }
+    var uid='vi'+(_vi++);
+    var colHdr='<tr>'+
+      '<th style="color:var(--mu);font-size:10px;font-weight:500;text-align:left;padding:0 14px 6px 0;text-transform:uppercase;letter-spacing:.04em"></th>'+
+      '<th style="color:var(--mu);font-size:10px;font-weight:500;text-align:left;padding:0 10px 6px 0;text-transform:uppercase;letter-spacing:.04em">Current</th>'+
+      '<th></th>'+
+      '<th style="color:var(--grn);font-size:10px;font-weight:500;text-align:left;padding:0 0 6px;text-transform:uppercase;letter-spacing:.04em">Suggested</th></tr>';
+    return '<div style="padding:10px 14px 14px;border-top:1px solid var(--bd)">'+
+      '<div style="font-size:11px;color:var(--mu);font-weight:600;margin-bottom:10px">'+
+        'container: <span style="color:var(--tx)">'+esc(c.container)+'</span>'+
+      '</div>'+
+      '<div style="display:flex;gap:4px;margin-bottom:12px">'+
+        '<button class="vpa-tab vpa-tab-on" id="'+uid+'tg" onclick="vpaTab(\''+uid+'\',\'g\')">Guaranteed QoS</button>'+
+        '<button class="vpa-tab" id="'+uid+'tb" onclick="vpaTab(\''+uid+'\',\'b\')">Burstable QoS</button>'+
+      '</div>'+
+      '<div id="'+uid+'pg">'+
+        '<table style="border-collapse:collapse"><thead>'+colHdr+'</thead><tbody>'+
+        qosRows(c,true)+'</tbody></table>'+
+        yamlBlock(c.target_cpu,c.target_cpu,c.target_mem,c.target_mem,uid+'yg')+
+      '</div>'+
+      '<div id="'+uid+'pb" style="display:none">'+
+        '<table style="border-collapse:collapse"><thead>'+colHdr+'</thead><tbody>'+
+        qosRows(c,false)+'</tbody></table>'+
+        yamlBlock(c.lower_cpu,c.upper_cpu,c.lower_mem,c.upper_mem,uid+'yb')+
+      '</div>'+
+    '</div>';
+  }
+
+  /* ── Build HTML ─────────────────────────────────────────────── */
+  var html='';
+  Object.keys(nsMap).sort().forEach(function(ns){
+    var deps=nsMap[ns];
+    var depsHtml=Object.keys(deps).sort().map(function(dk){
+      var dep=deps[dk];
+      var modeBadge='<span style="color:'+modeCol(dep.update_mode)+
+        ';font-size:10px;font-weight:600;background:var(--bg3);border-radius:3px;padding:1px 7px;margin-left:6px">'+
+        esc(dep.update_mode)+'</span>';
+      return '<div style="margin-bottom:10px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px">'+
+        '<div style="padding:10px 14px;display:flex;align-items:center">'+
+          '<span style="color:var(--mu);font-size:11px">'+esc(dep.kind)+'/</span>'+
+          '<span style="font-size:13px;font-weight:600">'+esc(dep.name)+'</span>'+
+          modeBadge+
+        '</div>'+
+        dep.containers.map(renderContainer).join('')+
+      '</div>';
+    }).join('');
+
+    html+='<div style="margin-bottom:22px">'+
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'+
+        '<span style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--mu)">Namespace</span>'+
+        '<span style="background:#1c2128;border-radius:3px;padding:2px 9px;font-size:12px;font-weight:600">'+esc(ns)+'</span>'+
+      '</div>'+depsHtml+'</div>';
+  });
+
+  el.innerHTML=html||'<p class="empty">No VPA recommendations yet. The recommender needs to observe workloads before producing data.</p>';
 }
 
 /* ── progress bar + auto-refresh ─────────────────────────────────── */
